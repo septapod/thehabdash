@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>thehabdash</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #0A0A0A; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+new p5(function(p) {
+
+  // ── Brand colors ──────────────────────────────────────────────
+  const YELLOW = [0,   174, 239];   // Cyan    #00AEEF
+  const TEAL   = [236, 0,   140];   // Magenta #EC008C
+  const CORAL  = [255, 242, 0];     // Yellow  #FFF200
+
+  // ── Grid ─────────────────────────────────────────────────────
+  // GRID=22 → 10,648 cells. Plenty of detail, safe on slow hardware.
+  const GRID  = 22;
+  const SIZE  = 500;
+  const STEP  = SIZE / GRID;
+  const LIMIT = 0.13;
+  const G2    = GRID * GRID;
+  const G3    = GRID * GRID * GRID;
+
+  // ── Pre-allocated buffers (avoid per-frame GC pressure) ───────
+  const cache     = new Float32Array(G3);
+
+  // Worst-case segments: (GRID-1)³ cells × 3 axes × 6 floats per segment
+  const MAX_SEG   = (GRID - 1) * (GRID - 1) * (GRID - 1) * 3 * 6;
+  const segBuf    = new Float32Array(MAX_SEG);
+  let   segCount  = 0;
+
+  // ── Pre-computed trig & coordinate tables ─────────────────────
+  // All three axes share the same symmetric range [-π, π], so one table covers all.
+  const coordTab  = new Float32Array(GRID);
+  const cosTab    = new Float32Array(GRID);
+  const sinTab    = new Float32Array(GRID);
+  for (let i = 0; i < GRID; i++) {
+    coordTab[i] = (i / (GRID - 1) - 0.5) * Math.PI * 2;
+    cosTab[i]   = Math.cos(coordTab[i]);
+    sinTab[i]   = Math.sin(coordTab[i]);
+  }
+
+  // Per-frame breath helpers (recomputed each draw before inner loop)
+  const breathIJ  = new Float32Array(GRID * GRID); // indexed [i*GRID+j]
+  const breathK   = new Float32Array(GRID);         // indexed [k]
+
+  // ── Interaction state ─────────────────────────────────────────
+  let morphT    = 0.5;  // 0 = Neovius, 1 = Gyroid  (mouse X)
+  let rippleT   = 0.0;  // radial distortion          (mouse Y)
+  let spinY     = 0,  spinX     = 0;
+  let driftVelY = 0.004, driftVelX = 0;
+  let isDragging = false;
+  let prevMX = 0, prevMY = 0;
+  let impulse   = 0;
+  let explode   = 0;
+  let phase     = 0;
+
+  // ── Fill the cache ───────────────────────────────────────────
+  // Computes gVal for every grid cell exactly once per frame.
+  // Each cell blends Neovius + Gyroid based on morphT, plus
+  // a slow breathing effect and a radial ripple from mouse Y.
+  function fillCache(ms) {
+    const t    = ms * 0.00025;
+    const nSc  = (1 - morphT) / 7.0;
+    const gSc  = morphT / 1.73;
+    const rip  = rippleT * 0.14;
+
+    // Precompute breath factors for each i/j pair and each k.
+    // This drops trig inside the inner loop from ~8 calls to 1.
+    for (let i = 0; i < GRID; i++) {
+      for (let j = 0; j < GRID; j++) {
+        breathIJ[i * GRID + j] = 0.045 *
+          Math.sin(t + coordTab[i] * 0.8 + coordTab[j] * 0.6);
+      }
+      breathK[i] = Math.cos(t * 0.7 - coordTab[i] * 0.5);
+    }
+
+    let idx = 0;
+    for (let i = 0; i < GRID; i++) {
+      const cx = cosTab[i], sx = sinTab[i];
+      const bi = i * GRID;
+      for (let j = 0; j < GRID; j++) {
+        const cy = cosTab[j], sy = sinTab[j];
+        const bij = breathIJ[bi + j];
+        for (let k = 0; k < GRID; k++) {
+          const cz = cosTab[k], sz = sinTab[k];
+
+          // Neovius: 3(cos x + cos y + cos z) + 4 cos x cos y cos z
+          const n = (3 * (cx + cy + cz) + 4 * cx * cy * cz) * nSc;
+          // Gyroid: sin x cos y + sin y cos z + sin z cos x
+          const g = (sx * cy + sy * cz + sz * cx) * gSc;
+          // Breathing (1 sin — precomputed from breathIJ/breathK)
+          const breath = bij * breathK[k];
+          // Ripple (Chebyshev distance → 1 sin per cell)
+          const rch    = Math.max(
+            Math.abs(coordTab[i]),
+            Math.abs(coordTab[j]),
+            Math.abs(coordTab[k])
+          ) / Math.PI;
+          const ripple = rip * Math.sin(rch * Math.PI * 2.0);
+
+          cache[idx++] = n + g + breath + ripple;
+        }
+      }
+    }
+  }
+
+  // ── Build segment list from cached values ─────────────────────
+  // Zero-crossing detection: when a cell and its +x/+y/+z neighbor
+  // have opposite signs, the surface passes between them.
+  function buildSegments() {
+    segCount = 0;
+    for (let i = 0; i < GRID - 1; i++) {
+      const px  = -SIZE / 2 + i * STEP;
+      const iG2 = i * G2;
+      for (let j = 0; j < GRID - 1; j++) {
+        const py   = -SIZE / 2 + j * STEP;
+        const base = iG2 + j * GRID;
+        for (let k = 0; k < GRID - 1; k++) {
+          const idx = base + k;
+          const val = cache[idx];
+          if (val > LIMIT || val < -LIMIT) continue;
+
+          const pz  = -SIZE / 2 + k * STEP;
+          const pos = val > 0;
+
+          if (pos !== (cache[idx + G2]   > 0)) {
+            segBuf[segCount++] = px;       segBuf[segCount++] = py; segBuf[segCount++] = pz;
+            segBuf[segCount++] = px + STEP; segBuf[segCount++] = py; segBuf[segCount++] = pz;
+          }
+          if (pos !== (cache[idx + GRID] > 0)) {
+            segBuf[segCount++] = px; segBuf[segCount++] = py;        segBuf[segCount++] = pz;
+            segBuf[segCount++] = px; segBuf[segCount++] = py + STEP; segBuf[segCount++] = pz;
+          }
+          if (pos !== (cache[idx + 1]    > 0)) {
+            segBuf[segCount++] = px; segBuf[segCount++] = py; segBuf[segCount++] = pz;
+            segBuf[segCount++] = px; segBuf[segCount++] = py; segBuf[segCount++] = pz + STEP;
+          }
+        }
+      }
+    }
+  }
+
+  // ── Draw cached segments with one GL call per layer ───────────
+  // beginShape(LINES) batches all vertices into a single draw call.
+  function drawLayer(col, alpha, sw, rx, ry) {
+    p.push();
+    p.rotateX(rx);
+    p.rotateY(ry);
+    p.stroke(col[0], col[1], col[2], alpha);
+    p.strokeWeight(sw);
+    p.beginShape(p.LINES);
+    for (let s = 0; s < segCount; s += 3) {
+      p.vertex(segBuf[s], segBuf[s + 1], segBuf[s + 2]);
+    }
+    p.endShape();
+    p.pop();
+  }
+
+  // ── Setup ─────────────────────────────────────────────────────
+  p.setup = function() {
+    p.createCanvas(p.windowWidth, p.windowHeight, p.WEBGL);
+    p.perspective(p.PI / 3.2, p.width / p.height, 1, 10000);
+    // pixelDensity(1): halves GPU fill work on retina screens.
+    // The geometry is 3D line art — lower density is barely visible.
+    p.pixelDensity(1);
+    p.noFill();
+  };
+
+  // ── Draw ──────────────────────────────────────────────────────
+  p.draw = function() {
+    p.background(10, 10, 10);
+    const ms = p.millis();
+
+    // Lerp morph targets toward mouse
+    const tx = p.width  > 0 ? p.mouseX / p.width  : 0.5;
+    const ty = p.height > 0 ? p.mouseY / p.height : 0.5;
+    morphT  += (tx       - morphT)  * 0.04;
+    rippleT += (ty*2 - 1 - rippleT) * 0.04;
+
+    // Rotation + momentum
+    if (!isDragging) {
+      driftVelY *= 0.93;
+      driftVelX *= 0.93;
+      spinY += driftVelY;
+      spinX += driftVelX;
+      const mag = Math.abs(driftVelY) + Math.abs(driftVelX);
+      spinY += 0.004 * Math.max(0, 1 - mag * 35);
+    }
+    impulse *= 0.88;
+    spinY   += impulse;
+    spinX    = Math.max(-Math.PI * 0.42, Math.min(Math.PI * 0.42, spinX));
+
+    // Double-click explode pulse
+    explode *= 0.91;
+    p.scale(1 + explode * 0.38);
+
+    // Slow layer drift phase
+    phase = Math.sin(ms * 0.00011) * 0.30;
+
+    // Compute surface once, draw three times
+    fillCache(ms);
+    buildSegments();
+
+    drawLayer(YELLOW, 215, 1.0,  spinX,              spinY);
+    drawLayer(TEAL,   155, 0.85, spinX + phase*0.28, spinY + phase);
+    drawLayer(CORAL,  70,  0.65, spinX - phase*0.15, spinY - phase*0.55);
+  };
+
+  // ── Input handlers ────────────────────────────────────────────
+  p.mousePressed  = function() { isDragging = true;  prevMX = p.mouseX; prevMY = p.mouseY; driftVelY = 0; driftVelX = 0; };
+  p.mouseDragged  = function() {
+    const dx = p.mouseX - prevMX, dy = p.mouseY - prevMY;
+    driftVelY = dx * 0.009; driftVelX = dy * 0.009;
+    spinY += driftVelY; spinX += driftVelX;
+    prevMX = p.mouseX; prevMY = p.mouseY;
+  };
+  p.mouseReleased = function() { isDragging = false; };
+  p.mouseClicked  = function() {
+    if (p.dist(p.mouseX, p.mouseY, prevMX, prevMY) < 5)
+      impulse = (Math.random() > 0.5 ? 1 : -1) * 0.07;
+  };
+  p.doubleClicked = function() { explode = 1.0; };
+
+  p.touchStarted  = function() { isDragging = true;  prevMX = p.touchX; prevMY = p.touchY; driftVelY = 0; driftVelX = 0; return false; };
+  p.touchMoved    = function() {
+    const dx = p.touchX - prevMX, dy = p.touchY - prevMY;
+    driftVelY = dx*0.009; driftVelX = dy*0.009;
+    spinY += driftVelY; spinX += driftVelX;
+    prevMX = p.touchX; prevMY = p.touchY; return false;
+  };
+  p.touchEnded    = function() { isDragging = false; return false; };
+
+  p.windowResized = function() {
+    p.resizeCanvas(p.windowWidth, p.windowHeight);
+    p.perspective(p.PI / 3.2, p.width / p.height, 1, 10000);
+  };
+
+});
+</script>
+</body>
+</html>
