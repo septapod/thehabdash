@@ -198,6 +198,9 @@ input{width:100%;height:32px;accent-color:#b18bff}
 @media(max-width:350px){.soundtray{bottom:67px}}
 
 #tour{position:absolute;top:max(12px,env(safe-area-inset-top));left:12px;width:min(338px,calc(100% - 95px));padding:9px 13px;background:#17121fee;border:1px solid #514358;font:16px/1.4 HabdashMono,monospace}
+#tour{max-height:44dvh;overflow:auto}
+#tour-more summary{cursor:pointer;color:#dac5eb}
+#tour-odds{color:#efc5a3}
 #tour p{margin:3px 0 8px}
 #tour .tour-row{display:flex;align-items:center;justify-content:space-between;gap:6px}
 #tour select,#tour button{font:inherit;color:#ecdbf3;background:transparent}
@@ -234,6 +237,8 @@ input{width:100%;height:32px;accent-color:#b18bff}
 <aside id="tour" hidden aria-label="Playing tour">
 <div class="tour-row"><select id="tour-stage" aria-label="Jump to a tour step"></select><button id="tour-close" aria-label="Close tour">×</button></div>
 <p id="tour-tip" aria-live="polite"></p>
+<p id="tour-odds" hidden></p>
+<details id="tour-more"><summary>How it works</summary><p id="tour-detail"></p></details>
 <div class="tour-row"><button id="tour-back">Back</button><button id="tour-next">Next →</button></div>
 </aside>
 <section id="settings" aria-label="Instrument options" hidden><label for="tempo">Tempo <output id="bpm">92 BPM</output></label><input type="range" id="tempo" min="50" max="160" value="92">
@@ -2734,15 +2739,15 @@ window.CarbonScene = function CarbonScene(canvas) {
 (() => {
   const get = id => document.getElementById(id);
   const steps = [
-    ['Draw', 'Draw a rising line on the grid. Listen as you draw, then lift to hear it again.', ''],
-    ['Loop', 'Use Play to hear the whole score. Draw a circle and listen for two pitches as the light crosses both sides.', '#transport'],
-    ['Voices', 'Tap copper to hear a pluck. Tap violet to hear the reed. Draw with either brush to add that voice.', '[data-kind]'],
-    ['Echo', 'Turn on Echo. Move the depth slider toward Far and draw a line. Listen for its reflections.', '[data-fx="space"], #depth'],
-    ['Brightness', 'Turn on Brightness. Try the same pitch near and far. Far brings out bright overtones.', '[data-fx="tone"], #depth'],
-    ['Buzz', 'Turn on Buzz. Move from Near to Far to hear the smooth tone grow rough. Effects can play together.', '[data-fx="wave"], #depth'],
-    ['Chance', 'Turn on Chance and draw near the back. Play the loop for a few passes. That stroke can skip a pass.', '[data-fx="chance"], #depth'],
-    ['Edit', 'Tap a stroke to hear it. Drag it to move it, or use the slider to change its depth.', '#depth'],
-    ['Turn', 'Drag the cube to see your music from another angle. Tap Done to keep playing.', '#orbit']
+    ['Draw', 'Draw from low on the left to high on the right. Lift to hear the pitches climb in sequence.', '', 'Height sets pitch. Horizontal position sets the moment each pitch sounds. A wider line takes longer to play, even if you draw it quickly.'],
+    ['Loop', 'Draw a circle. Listen as the light crosses its upper and lower arcs: you can hear two pitches at the same instant.', '#transport', 'Play scans the score from left to right. Each intersection can sound a voice. Drawing back over the same stretch of time lets you build harmony with one gesture.'],
+    ['Voices', 'Tap copper, then violet. Listen to how each note begins: the wire snaps into a pluck, while the reed opens into a flutter.', '[data-kind]', 'Draw a horizontal line with each brush at the same height and width. Matching pitch and duration makes the difference in timbre easier to hear.'],
+    ['Echo', 'With Echo enabled, draw a short note at Near. Move the slider to Far and draw another at the same height. Listen after each attack.', '[data-fx="space"], #depth', 'Depth changes the balance of direct sound and reflections. Near gives the attack more presence. Far softens it and sends more of the note into the room.'],
+    ['Brightness', 'Enable Brightness and draw a level line. Tap it to select it, then move its depth slider from Near to Far. Listen for overtones emerging above the pitch.', '[data-fx="tone"], #depth', 'The filter opens as depth increases, revealing higher harmonics. To hear Brightness on its own, choose it as the only effect before drawing.'],
+    ['Buzz', 'Enable Buzz and draw a note. Select it and move its depth slider toward Far. Listen for a toothed edge building around the same pitch.', '[data-fx="wave"], #depth', 'Buzz mixes in a sawtooth-like waveform rich in harmonics. Brightness shapes which harmonics come through. Try both effects on a new stroke.'],
+    ['Chance', 'With the dice enabled, draw a straight line at Near. Set the depth slider halfway and draw a second line. In the loop, the first plays every pass. The second has a 1 in 4 chance each pass.', '[data-fx="chance"], #depth', 'Each pass gets a fresh roll, so several hits or rests can come in a row. At Far the odds are 1 in 16. A folded stroke rolls separately for each branch, using its depth where playback enters it. Solo previews always sound.'],
+    ['Edit', 'Tap a stroke to hear it alone. Drag it higher to raise its pitches or sideways to shift when it plays. Pull its depth rail to hear its selected effects change.', '#depth', 'Choosing brushes and effects sets up your next stroke. To give those settings to an existing stroke, select it and tap the stamp. Undo restores your previous edit.'],
+    ['Turn', 'Drag the cube to look along the depth axis. Strokes that overlap from the front can sit far apart. Use the curved arrow to return to the opening angle.', '#orbit', 'Turning changes your viewpoint. Each stroke keeps its timing, pitches, and depth. Tap the cube to switch between drawing and turning the view.']
   ];
   const tour = get('tour'), stage = get('tour-stage');
   const storageKey = 'habdash-playing-tour-step';
@@ -2762,15 +2767,27 @@ window.CarbonScene = function CarbonScene(canvas) {
     index = i;
     persist();
     clearTargets();
-    const [name, tip, targets] = steps[i];
+    const [, tip, targets, detail] = steps[i];
     const effects = targets.includes('data-fx');
     if (effects === get('fx-panel').hidden) get('fx-toggle').click();
     if (targets) document.querySelectorAll(targets).forEach(el => el.classList.add('tour-target'));
     stage.value = String(i);
     get('tour-tip').textContent = tip;
+    get('tour-detail').textContent = detail;
+    get('tour-more').open = false;
+    get('tour-odds').hidden = steps[i][0] !== 'Chance';
+    updateOdds();
     get('tour-back').disabled = i === 0;
     get('tour-next').textContent = i === steps.length-1 ? 'Done' : 'Next →';
   }
+  function updateOdds() {
+    if (tour.hidden || get('tour-odds').hidden) return;
+    const depth = Number(get('depth').value) / 100;
+    const percent = Number((100 * CarbonAudio.depthInfo(depth, ['chance']).chance).toFixed(2));
+    get('tour-odds').textContent = 'At this depth with Chance: ' + percent + '% per roll';
+  }
+  get('depth').addEventListener('input', updateOdds);
+  new MutationObserver(updateOdds).observe(get('depth-val'), {childList:true, subtree:true, characterData:true});
   function close() {
     tour.hidden = true;
     clearTargets();
