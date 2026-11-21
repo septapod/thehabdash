@@ -401,6 +401,13 @@ input{width:100%;height:32px;accent-color:#b18bff}
     window.dispatchEvent(new Event('carbonaudiointerrupt'));
   }
   function openContext(Constructor){
+    // Music is the primary output. Request media playback before Web Audio activates.
+    try {
+      const session = navigator.audioSession;
+      if (session && session.type !== 'playback') session.type = 'playback';
+    } catch {
+      // Audio Session is optional. The browser can still use its default behavior.
+    }
     const next=new Constructor({latencyHint:'interactive'});
     context=next;
     next.addEventListener('statechange',()=>{
