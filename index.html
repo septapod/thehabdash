@@ -2124,7 +2124,7 @@ window.CarbonScene = function CarbonScene(canvas) {
     $('sounds').hidden=!$('settings').hidden;$('erase').hidden=!n;$('undo').hidden=!history.length;
     $('apply').hidden=!n || (n.kind===brush.kind && n.fx.length===brush.fx.length && n.fx.every(f=>brush.fx.includes(f)));
     $('depth').value=Math.round(depth*100);$('depth-val').value=$('depth').value+'%';
-    $('clear').disabled=!notes.length;$('starter').disabled=!!notes.length;
+    $('clear').disabled=!notes.length;
     for(const b of document.querySelectorAll('[data-fx]'))b.setAttribute('aria-pressed',String(brush.fx.includes(b.dataset.fx)));
     for(const b of document.querySelectorAll('[data-kind]'))b.setAttribute('aria-pressed',String(b.dataset.kind===brush.kind));
     showBrushSummary();
@@ -2427,7 +2427,7 @@ window.CarbonScene = function CarbonScene(canvas) {
     audio.reconcile(notes,n.group);audition(n,true);alignUI('Brush applied to drawing');
   };
   $('starter').onclick=()=>{
-    if(notes.length)return;
+    stop();
     remember(snapshot());notes=structuredClone(starter);
     $('settings').hidden=true;$('options').setAttribute('aria-expanded','false');clearSelection();
   };
