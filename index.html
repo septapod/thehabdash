@@ -187,6 +187,8 @@ button svg{width:27px;height:27px;pointer-events:none;stroke:currentColor;stroke
 input{width:100%;height:32px;accent-color:#b18bff}
 #settings p{font:400 16px/1.6 HabdashMono,monospace;margin:12px 0;color:#dbd2e4}
 #settings button{font:inherit;color:var(--soft);border:1px solid #57465f;margin-top:8px}
+#take-export{margin:16px 0;padding:10px 0;border-block:1px solid #43384b}
+#take-export a{display:inline-flex;align-items:center;min-height:45px;margin-right:12px}
 #settings summary{cursor:pointer;font:400 18px/1.5 HabdashMono,monospace;letter-spacing:-.02em;padding:5px 0}
 .sr{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}
 @media(max-width:580px){
@@ -256,6 +258,12 @@ input{width:100%;height:32px;accent-color:#b18bff}
 <div class="tour-row"><button id="tour-back">Back</button><button id="tour-next">Next →</button></div>
 </aside>
 <section id="settings" aria-label="Instrument options" hidden><label for="tempo">Tempo <output id="bpm">92 BPM</output></label><input type="range" id="tempo" min="50" max="160" value="92">
+<div id="take-export">
+<button type="button" id="make-take">Prepare audio export</button>
+<p id="take-status" role="status">Save four passes with the echo tail. WAV and MIDI use the same take.</p>
+<a id="save-wav" download="the-habdash.wav" hidden>Save WAV</a>
+<a id="save-midi" download="the-habdash.mid" hidden>Save MIDI</a>
+</div>
 <button id="tour-start">Show me how it works</button>
 <details><summary>Quick reference</summary>
 <p>Height sets pitch. Width sets playing time. Tap a stroke to select it. The stamp applies your brush to it. While drawing, scroll or slide a second finger up or down to change depth.</p>
@@ -282,808 +290,887 @@ input{width:100%;height:32px;accent-color:#b18bff}
     max:maxPitch, perOctave:scale.length,
     name(row){return pitchNames[row%7]+(2+Math.floor((semitone(row)+2)/12));}
   };
-  const voiceLimit = 40;
-  const flutterHz = 5.3;
-  let attackId=0;
-  let clockCheck=null, confirmedClock=null, lastTickTime=0, lastTickAt=0;
-  const lookAhead = .14;
-  const voices = new Set();
-  let context, roomImpulse, noise, pluckWave, grainWave, brightPluckWave, brightBowWave, copperBuzzWave, reedBuzzWave, bus;
-  let transport = null, intervalId = 0, visualId = 0;
-  let preview = null, previewTimer = 0, pendingPreview = null, lastPreview = -Infinity;
+  function createAudioEngine(renderingTake=false) {
+    const voiceLimit = 40;
+    const flutterHz = 5.3;
+    let attackId=0;
+    let clockCheck=null, confirmedClock=null, lastTickTime=0, lastTickAt=0;
+    const lookAhead = .14;
+    const voices = new Set();
+    let context, roomImpulse, noise, pluckWave, grainWave, brightPluckWave, brightBowWave, copperBuzzWave, reedBuzzWave, bus;
+    let transport = null, intervalId = 0, visualId = 0;
+    let preview = null, previewTimer = 0, pendingPreview = null, lastPreview = -Infinity;
 
-  const tracks=new Set();
-  let solo=null;
+    const tracks=new Set();
+    let solo=null;
 
-  const effectNames=['space','chance','tone','wave'];
-  function effectsFor(note,mode){
-    if(Array.isArray(note?.fx))return note.fx;
-    return Array.isArray(mode)?mode:effectNames.includes(mode)?[mode]:[];
-  }
-  function depthInfo(z,mode) {
-    const depth=unit(z),fx=effectsFor(null,mode);
-    const chance=fx.includes('chance')?Math.pow(2,-4*depth):1;
-    const labels=[];
-    if(fx.includes('space'))labels.push(depth<.22?'Close':depth<.52?'Across the room':depth<.80?'Far':'Distant');
-    if(fx.includes('chance'))labels.push(Number((chance*100).toFixed(2))+'% chance');
-    if(fx.includes('tone'))labels.push(depth<.22?'Muted':depth<.53?'Warm':depth<.8?'Bright':'Glassy');
-    if(fx.includes('wave'))labels.push(depth===0?'Sine':depth===1?'Sawtooth':Math.round(depth*100)+'% sawtooth');
-    return {label:labels.join(' · ')||'Neutral',chance};
-  }
+    const effectNames=['space','chance','tone','wave'];
+    function effectsFor(note,mode){
+      if(Array.isArray(note?.fx))return note.fx;
+      return Array.isArray(mode)?mode:effectNames.includes(mode)?[mode]:[];
+    }
+    function depthInfo(z,mode) {
+      const depth=unit(z),fx=effectsFor(null,mode);
+      const chance=fx.includes('chance')?Math.pow(2,-4*depth):1;
+      const labels=[];
+      if(fx.includes('space'))labels.push(depth<.22?'Close':depth<.52?'Across the room':depth<.80?'Far':'Distant');
+      if(fx.includes('chance'))labels.push(Number((chance*100).toFixed(2))+'% chance');
+      if(fx.includes('tone'))labels.push(depth<.22?'Muted':depth<.53?'Warm':depth<.8?'Bright':'Glassy');
+      if(fx.includes('wave'))labels.push(depth===0?'Sine':depth===1?'Sawtooth':Math.round(depth*100)+'% sawtooth');
+      return {label:labels.join(' · ')||'Neutral',chance};
+    }
 
-  function seeded(seed) {
-    let x=seed>>>0;
-    return () => { x=(Math.imul(x,1664525)+1013904223)>>>0;return x/4294967296; };
-  }
+    function seeded(seed) {
+      let x=seed>>>0;
+      return () => { x=(Math.imul(x,1664525)+1013904223)>>>0;return x/4294967296; };
+    }
 
-  function makeMaterials(c) {
-    const rate=c.sampleRate, random=seeded(0x90b3a141);
-    noise=c.createBuffer(1,Math.floor(rate*.58),rate);
-    const n=noise.getChannelData(0);let last=0;
-    for(let i=0;i<n.length;i++){const white=random()*2-1;n[i]=.75*white+.25*last;last=white;}
-    roomImpulse=c.createBuffer(2,Math.ceil(rate*1.72),rate);
-    // A common diffuse field survives mono summing. Independent side reflections add width in stereo.
-    const shared=new Float32Array(roomImpulse.length);
-    let center=0;
-    for(let i=0;i<shared.length;i++){center=.77*center+.23*(random()*2-1);shared[i]=center;}
-    for(let ch=0;ch<2;ch++){
-      const data=roomImpulse.getChannelData(ch);
-      let moss=0;
-      for(let i=0;i<data.length;i++){
-        const t=i/rate;
-        moss=.62*moss+.38*(random()*2-1);
-        const bloom=clamp((t-.012)/.049,0,1);
-        data[i]=(shared[i]*.46+moss*.72)*.044*Math.sqrt(48000/rate)*bloom*Math.exp(-t*3.85);
-      }
-      const reflections=ch===0?[[.009,.33],[.027,.22],[.069,-.20],[.121,.15],[.169,.10]]:[[.017,.33],[.044,.25],[.080,-.15],[.106,.16],[.158,.12]];
-      for(const [sec,gain] of reflections)data[Math.round(sec*rate)]+=gain;
-    }
-    function wave(partials){
-      return c.createPeriodicWave(new Float32Array(partials.length),new Float32Array(partials));
-    }
-    pluckWave=wave([0,1,.80,.08,.38,.04,.12,.02,.06]);
-    // A toothed reed keeps its hollow bore resonance as Buzz rises.
-    // Concentrate the rasp in audible upper harmonics, even on a small speaker.
-    // Separate odd/even weights preserve the reed and wire in a layered phrase.
-    function buzzSpectrum(reed){
-      return Array.from({length:65},(_,n)=>{
-        if(n===0)return 0;
-        const bite=1+2.8*Math.exp(-((Math.log2(n/8))**2)/1.7);
-        const weight=reed?(n%2?1:.28):(n%2?.72:1);
-        return bite*weight/n**.72;
-      });
-    }
-    copperBuzzWave=wave(buzzSpectrum(false));
-    reedBuzzWave=wave(buzzSpectrum(true));
-    grainWave=wave([0,1,0,.75,0,.22,0,.07]);
-    // With brightness enabled, the depth filter can reveal higher string harmonics.
-    brightPluckWave=wave([0,1,.86,.10,.42,.05,.16,.03,.08,.02]);
-    brightBowWave=wave([0,1,.035,.70,.025,.39,.015,.22,.01,.13]);
-  }
-
-  function makeBus() {
-    const c=context,sum=c.createGain(),gain=c.createGain(),room=c.createConvolver();
-    room.normalize=false;room.buffer=roomImpulse;
-    // Keep bass in the direct sound and leave room above ordinary chord peaks.
-    const reflections=c.createBiquadFilter();
-    reflections.type='highpass';reflections.frequency.value=175;reflections.Q.value=.62;
-    room.connect(reflections);reflections.connect(sum);
-    // The central slope is linear. Only unusually loud peaks reach the soft ceiling.
-    // Scaling into the curve leaves room for summed audio above full scale with no lookahead.
-    const guard=c.createWaveShaper(),ceiling=new Float32Array(2049);
-    for(let i=0;i<ceiling.length;i++){
-      const x=4*i/(ceiling.length-1)-2,magnitude=Math.abs(x);
-      const limited=magnitude<=.70?magnitude:.70+.30*Math.tanh((magnitude-.70)/.30);
-      ceiling[i]=Math.sign(x)*limited;
-    }
-    guard.curve=ceiling;
-    sum.gain.value=.45;gain.gain.value=.90;
-    const peaks=c.createDynamicsCompressor();
-    peaks.threshold.value=-10;peaks.knee.value=4;peaks.ratio.value=5;
-    peaks.attack.value=.003;peaks.release.value=.09;
-    sum.connect(peaks);peaks.connect(guard);guard.connect(gain);gain.connect(c.destination);
-    const wall=c.createDelay(.4),secondWall=c.createDelay(.4),returnLevel=c.createGain();
-    wall.delayTime.value=.113;secondWall.delayTime.value=.128;returnLevel.gain.value=.52;
-    wall.connect(reflections);wall.connect(secondWall);secondWall.connect(returnLevel);returnLevel.connect(reflections);
-    return {sum,room,gain,wall,nodes:[sum,gain,room,peaks,guard,reflections,wall,secondWall,returnLevel]};
-  }
-
-  function retireContext() {
-    const old=context;
-    stop();
-    context=null;confirmedClock=null;clockCheck=null;lastTickAt=0;
-    if(old && old.state!=='closed'){
-      try{old.close().catch(()=>{});}catch{}
-    }
-  }
-  function interrupt() {
-    retireContext();
-    window.dispatchEvent(new Event('carbonaudiointerrupt'));
-  }
-  function openContext(Constructor){
-    // Music is the primary output. Request media playback before Web Audio activates.
-    try {
-      const session = navigator.audioSession;
-      if (session && session.type !== 'playback') session.type = 'playback';
-    } catch {
-      // Audio Session is optional. The browser can still use its default behavior.
-    }
-    const next=new Constructor({latencyHint:'interactive'});
-    context=next;
-    next.addEventListener('statechange',()=>{
-      if(next===context && next===confirmedClock && next.state!=='running')interrupt();
-    });
-    makeMaterials(next);
-    return next;
-  }
-  function checkClock(c){
-    if(clockCheck?.context===c)return clockCheck.promise;
-    const origin=c.currentTime,start=performance.now();
-    // resume() can remain pending following an OS interruption. Poll the clock itself.
-    try{if(c.state!=='running')c.resume().catch(()=>{});}catch{}
-    const check={context:c};
-    clockCheck=check;
-    check.promise=new Promise(resolve=>{
-      function observe(){
-        if(c!==context || document.hidden){resolve(false);return;}
-        if(c.state==='running' && c.currentTime>origin){
-          confirmedClock=c;resolve(true);return;
+    function makeMaterials(c) {
+      const rate=c.sampleRate, random=seeded(0x90b3a141);
+      noise=c.createBuffer(1,Math.floor(rate*.58),rate);
+      const n=noise.getChannelData(0);let last=0;
+      for(let i=0;i<n.length;i++){const white=random()*2-1;n[i]=.75*white+.25*last;last=white;}
+      roomImpulse=c.createBuffer(2,Math.ceil(rate*1.72),rate);
+      // A common diffuse field survives mono summing. Independent side reflections add width in stereo.
+      const shared=new Float32Array(roomImpulse.length);
+      let center=0;
+      for(let i=0;i<shared.length;i++){center=.77*center+.23*(random()*2-1);shared[i]=center;}
+      for(let ch=0;ch<2;ch++){
+        const data=roomImpulse.getChannelData(ch);
+        let moss=0;
+        for(let i=0;i<data.length;i++){
+          const t=i/rate;
+          moss=.62*moss+.38*(random()*2-1);
+          const bloom=clamp((t-.012)/.049,0,1);
+          data[i]=(shared[i]*.46+moss*.72)*.044*Math.sqrt(48000/rate)*bloom*Math.exp(-t*3.85);
         }
-        if(c.state==='closed' || performance.now()-start>=650){resolve(false);return;}
-        setTimeout(observe,12);
+        const reflections=ch===0?[[.009,.33],[.027,.22],[.069,-.20],[.121,.15],[.169,.10]]:[[.017,.33],[.044,.25],[.080,-.15],[.106,.16],[.158,.12]];
+        for(const [sec,gain] of reflections)data[Math.round(sec*rate)]+=gain;
       }
-      observe();
-    }).finally(()=>{if(clockCheck===check)clockCheck=null;});
-    return check.promise;
-  }
-  function clockMoving(){
-    if(!context || context.state!=='running' || document.hidden)return false;
-    const tick=context.currentTime,now=performance.now();
-    if(tick!==lastTickTime || !lastTickAt){lastTickTime=tick;lastTickAt=now;}
-    return now-lastTickAt<700;
-  }
-  async function unlock(checkProgress=false) {
-    if(document.hidden)return false;
-    const Constructor=window.AudioContext||window.webkitAudioContext;
-    if(!Constructor)return false;
-    if(!context && navigator.userActivation && !navigator.userActivation.hasBeenActive)return false;
-    try {
-      const previous=context;
-      const c=previous && previous.state!=='closed'?previous:openContext(Constructor);
-      if(c===confirmedClock && c.state==='running' && !checkProgress)return true;
-      if(await checkClock(c))return true;
-      if(c!==context || document.hidden)return false;
-      // A completed but motionless browser session needs a fresh audio graph.
+      function wave(partials){
+        return c.createPeriodicWave(new Float32Array(partials.length),new Float32Array(partials));
+      }
+      pluckWave=wave([0,1,.80,.08,.38,.04,.12,.02,.06]);
+      // A toothed reed keeps its hollow bore resonance as Buzz rises.
+      // Concentrate the rasp in audible upper harmonics, even on a small speaker.
+      // Separate odd/even weights preserve the reed and wire in a layered phrase.
+      function buzzSpectrum(reed){
+        return Array.from({length:65},(_,n)=>{
+          if(n===0)return 0;
+          const bite=1+2.8*Math.exp(-((Math.log2(n/8))**2)/1.7);
+          const weight=reed?(n%2?1:.28):(n%2?.72:1);
+          return bite*weight/n**.72;
+        });
+      }
+      copperBuzzWave=wave(buzzSpectrum(false));
+      reedBuzzWave=wave(buzzSpectrum(true));
+      grainWave=wave([0,1,0,.75,0,.22,0,.07]);
+      // With brightness enabled, the depth filter can reveal higher string harmonics.
+      brightPluckWave=wave([0,1,.86,.10,.42,.05,.16,.03,.08,.02]);
+      brightBowWave=wave([0,1,.035,.70,.025,.39,.015,.22,.01,.13]);
+    }
+
+    function makeBus() {
+      const c=context,sum=c.createGain(),gain=c.createGain(),room=c.createConvolver();
+      room.normalize=false;room.buffer=roomImpulse;
+      // Keep bass in the direct sound and leave room above ordinary chord peaks.
+      const reflections=c.createBiquadFilter();
+      reflections.type='highpass';reflections.frequency.value=175;reflections.Q.value=.62;
+      room.connect(reflections);reflections.connect(sum);
+      // The central slope is linear. Only unusually loud peaks reach the soft ceiling.
+      // Scaling into the curve leaves room for summed audio above full scale with no lookahead.
+      const guard=c.createWaveShaper(),ceiling=new Float32Array(2049);
+      for(let i=0;i<ceiling.length;i++){
+        const x=4*i/(ceiling.length-1)-2,magnitude=Math.abs(x);
+        const limited=magnitude<=.70?magnitude:.70+.30*Math.tanh((magnitude-.70)/.30);
+        ceiling[i]=Math.sign(x)*limited;
+      }
+      guard.curve=ceiling;
+      sum.gain.value=.45;gain.gain.value=.90;
+      const peaks=c.createDynamicsCompressor();
+      peaks.threshold.value=-10;peaks.knee.value=4;peaks.ratio.value=5;
+      peaks.attack.value=.003;peaks.release.value=.09;
+      sum.connect(peaks);peaks.connect(guard);guard.connect(gain);gain.connect(c.destination);
+      const wall=c.createDelay(.4),secondWall=c.createDelay(.4),returnLevel=c.createGain();
+      wall.delayTime.value=.113;secondWall.delayTime.value=.128;returnLevel.gain.value=.52;
+      wall.connect(reflections);wall.connect(secondWall);secondWall.connect(returnLevel);returnLevel.connect(reflections);
+      return {sum,room,gain,wall,nodes:[sum,gain,room,peaks,guard,reflections,wall,secondWall,returnLevel]};
+    }
+
+    function retireContext() {
+      const old=context;
+      stop();
+      context=null;confirmedClock=null;clockCheck=null;lastTickAt=0;
+      if(old && old.state!=='closed'){
+        try{old.close().catch(()=>{});}catch{}
+      }
+    }
+    function interrupt() {
       retireContext();
-      return await checkClock(openContext(Constructor));
-    } catch {return false;}
-  }
-
-  function ensureBus(){if(!bus)bus=makeBus();return bus;}
-  function closeVoice(v) {
-    if(!voices.delete(v))return;
-    for(const node of v.nodes)node.disconnect();
-    if(preview===v)preview=null;
-  }
-  function hushVoice(v,fade=true){
-    if(!voices.has(v))return;
-    const t=context.currentTime;
-    v.end=Math.min(v.end,t+(fade?.008:0));
-    v.soundEnd=Math.min(v.soundEnd,v.end);
-    v.silent ||= v.start>=t;
-    if(fade && v.start<=t){
-      v.kill.gain.cancelScheduledValues(t);v.kill.gain.setValueAtTime(v.kill.gain.value,t);
-      v.kill.gain.linearRampToValueAtTime(0,t+.008);
-    }else v.kill.gain.value=0;
-    for(const src of v.sources){try{src.stop(t+(fade?.009:0));}catch{}}
-    if(!fade)closeVoice(v);
-  }
-
-  function depthSettings(v,z,fx,at,live=false) {
-    const d=unit(z),hasSpace=fx.includes('space'),hasTone=fx.includes('tone'),hasWave=fx.includes('wave');
-    const top=context.sampleRate*.45;
-    const space=hasSpace?d:0;
-    const brightness=hasTone?d:.49;
-    const toneLevel=hasTone?1.12-.09*brightness:1;
-    const dryLevel=v.hand ? .10+.94*(1-space)**2 : .16+.88*(1-space)**1.75;
-    const roomLevel=v.hand ? .40 : .62;
-    const airRatio=hasWave ? .68 : hasTone ? .37 : (v.hand ? .062 : .112);
-    // Fade from the fundamental into the richer string as depth opens the filter.
-    const brightBody=.07+.93*brightness;
-    const bodyLevel=hasWave ? .28+.72*(1-d) : (hasTone ? brightBody : 1);
-    const blendLevel=hasWave ? 1.46*d**.42 : (hasTone ? 1-brightBody : 0);
-    const params=[
-      [v.direct.gain,toneLevel*(hasSpace?dryLevel+(hasWave?.22*space:0):1)],
-      [v.wet.gain,toneLevel*(hasSpace?.014+roomLevel*space**1.20:(v.hand?0:.028))],
-      [v.preDelay.delayTime,.003+.087*space**1.38],
-      [v.air.frequency,Math.min(top,18800*Math.pow(airRatio,space))],
-      [v.colour.frequency,hasTone?Math.min(top,v.frequency*(1.03*2**(3.35*brightness))):Math.min(top,hasWave?14500:v.frequency*(v.grain?7:9))],
-      [v.shimmer.gain,(v.grain?.27:.50)*(hasTone?.55+.70*brightness:1)],
-      [v.body.gain,bodyLevel],
-      [v.sawGain.gain,blendLevel],
-      [v.bristleLevel.gain,hasWave?0:hasTone?.13+1.12*brightness:1]
-    ];
-    if(v.buzzFilter){
-      // Retain the teeth of the saw even at the darkest Brightness setting.
-      const harmonics=hasTone ? 9+25*brightness : 30;
-      params.push([v.buzzFilter.frequency,Math.min(top,v.frequency*harmonics)]);
+      window.dispatchEvent(new Event('carbonaudiointerrupt'));
     }
-    if(v.echoSend)params.push([v.echoSend.gain,hasSpace?.29*space**1.7:0]);
-    for(const [p,value] of params){
-      if(live){p.cancelScheduledValues(at);p.setTargetAtTime(value,at,.006);}
-      else p.setValueAtTime(value,at);
-    }
-    v.z=d;
-  }
-
-  function noteSeconds(bpm){return 15/clamp(Number(bpm)||96,36,240);}
-  function holdEnd(note){
-    return Math.min(steps-.5,note.step+clamp(Math.round(Number(note.duration)||1),1,4));
-  }
-  function playNote(note,mode,at,seconds,gateSeconds) {
-    if(!context||context.state!=='running')return null;
-    // Steal a voice on the audio clock, so a dense roll still gets its first notes.
-    const sounding=Array.from(voices).filter(v=>!v.silent && v.start<=at && v.soundEnd>at);
-    if(sounding.length>=voiceLimit){
-      const oldest=sounding.reduce((a,b)=>a.start<=b.start?a:b);
-      oldest.end=at;oldest.soundEnd=at;oldest.silent=at<=oldest.start;
-      const fade=oldest.silent?0:.004;
-      oldest.kill.gain.cancelScheduledValues(at);
-      oldest.kill.gain.setValueAtTime(oldest.silent?0:1,at);
-      oldest.kill.gain.linearRampToValueAtTime(0,at+fade);
-      for(const src of oldest.sources)src.stop(at+fade);
-    }
-    const c=context, dest=ensureBus(), grain=note.kind==='grain', fx=effectsFor(note,mode);
-    const pitch=clamp(Math.round(Number(note.pitch)||0),0,maxPitch);
-    const frequency=frequencyFor(pitch);
-    const power=.2+.8*unit(note.strength,.7);
-    const gate=note.phrase?seconds:gateSeconds;
-    const naturalRelease=grain?.115:.205;
-    const release=gate===undefined?naturalRelease:Math.min(note.phrase?.018:naturalRelease,gate*.20);
-    const sustain=gate===undefined?seconds*clamp(Math.round(Number(note.duration)||1),1,4):gate-release;
-    const len=sustain+release, end=at+len+.10;
-    const envelope=c.createGain(), source=c.createOscillator(), saw=c.createOscillator(), overtone=c.createOscillator();
-    const body=c.createGain(),shimmer=c.createGain(),colour=c.createBiquadFilter(),air=c.createBiquadFilter(),kill=c.createGain();
-    const direct=c.createGain(),wet=c.createGain(),preDelay=c.createDelay(.15),sawGain=c.createGain(),presence=c.createGain();
-    const brush=c.createBufferSource(), bristle=c.createBiquadFilter(), grit=c.createGain(),bristleLevel=c.createGain();
-    const v={attackId:++attackId,soundEnd:at+len,startIndex:note.sampleIndex??0,sampleIndex:note.sampleIndex??0,strength:unit(note.strength,.7),brushKind:note.brushKind,phrase:!!note.phrase,id:note.id,note:note.scoreNote||note,hand:!!(note.phrase||note.continuous||note.ink),group:note.group,continuous:!!note.continuous,start:at,end,silent:false,frequency,pitch,root:pitch,grain,fxKey:effectNames.filter(f=>fx.includes(f)).join('/'),
-      kill,direct,wet,air,colour,body,shimmer,preDelay,sawGain,bristleLevel,presence,
-      nodes:[envelope,source,saw,sawGain,overtone,body,shimmer,colour,air,presence,kill,direct,wet,preDelay,brush,bristle,grit,bristleLevel],sources:[source,saw,overtone,brush]};
-    voices.add(v);
-    if(fx.includes('tone'))source.setPeriodicWave(grain?brightBowWave:brightPluckWave);
-    else source.setPeriodicWave(grain?grainWave:pluckWave);
-    saw.type=fx.includes('tone') && !fx.includes('wave')?'sine':'sawtooth';
-    if(fx.includes('wave'))saw.setPeriodicWave(grain?reedBuzzWave:copperBuzzWave);
-    for(const osc of [source,saw]){
-      osc.frequency.setValueAtTime(frequency*(grain?1.0004:1.0025),at);
-      osc.frequency.exponentialRampToValueAtTime(frequency,at+.028);
-    }
-    overtone.type='sine';overtone.frequency.value=frequency*(grain?3:2);
-    for(const osc of [source,saw,overtone])osc.detune.setValueAtTime(0,at);
-    source.connect(body);body.connect(colour);saw.connect(sawGain);
-    if(fx.includes('wave')){
-      // Shape the saw independently of pluck damping, then share timing and room placement.
-      v.buzzFilter=c.createBiquadFilter();
-      v.buzzFilter.type='lowpass';v.buzzFilter.Q.value=.7;
-      sawGain.connect(v.buzzFilter);if(!grain)v.buzzFilter.connect(envelope);
-      v.nodes.push(v.buzzFilter);
-    }else sawGain.connect(colour);
-    // Keep the octave of the wire and the hollow third harmonic of the reed audible through depth changes.
-    overtone.connect(shimmer);shimmer.connect(envelope);
-    colour.type='lowpass';colour.Q.value=.71;
-    if(grain){
-      v.reed=c.createBiquadFilter();
-      v.reed.type='peaking';v.reed.Q.value=1.7;v.reed.gain.value=8;
-      v.reed.frequency.value=720+1050*reedOpening(note.row??pitch,pitch);
-      colour.connect(v.reed);
-      if(v.buzzFilter)v.buzzFilter.connect(v.reed);
-      v.reed.connect(envelope);v.nodes.push(v.reed);
-    }
-    else{
-      // The pluck sheds its high harmonics first, as the string loses energy.
-      const damping=c.createBiquadFilter();
-      damping.type='lowpass';
-      damping.Q.value=.56;
-      damping.frequency.setValueAtTime(Math.min(c.sampleRate*.42,7200+frequency*4),at);
-      damping.frequency.setTargetAtTime(Math.min(c.sampleRate*.42,920+frequency*3.4),at+.008,.048);
-      colour.connect(damping);
-      damping.connect(envelope);
-      v.nodes.push(damping);
-    }
-    envelope.connect(air);
-    air.type='lowpass';air.Q.value=.68;air.connect(presence);
-    if(note.phrase){
-      v.balance=c.createGain();v.nodes.push(v.balance);
-      presence.connect(v.balance);v.balance.connect(kill);
-    }else presence.connect(kill);
-    kill.connect(direct);kill.connect(wet);
-    if(c.createStereoPanner){
-      const pan=c.createStereoPanner();
-      pan.pan.value=grain?.24:-.24;
-      direct.connect(pan);pan.connect(dest.sum);v.nodes.push(pan);
-    }else direct.connect(dest.sum);
-    wet.connect(preDelay);preDelay.connect(dest.room);
-    if(v.hand && fx.includes('space')){
-      v.echoSend=c.createGain();kill.connect(v.echoSend);v.echoSend.connect(dest.wall);
-      v.nodes.push(v.echoSend);
-    }
-    depthSettings(v,note.z,fx,at);
-    if(Number.isFinite(note.row)){
-      for(const osc of [source,saw,overtone])osc.detune.setValueAtTime(fineBend(note),at);
-    }
-    brush.buffer=noise;brush.loop=true;bristle.type='bandpass';
-    bristle.frequency.value=grain?Math.min(620+frequency*3,3200):Math.min(650+frequency*2,3400);
-    bristle.Q.value=grain?1.3:.90;
-    brush.connect(bristle);bristle.connect(grit);grit.connect(bristleLevel);bristleLevel.connect(air);
-    const amp=(grain?.28:.57)*power;
-    const attack=Math.min(grain?.018:.0028,sustain*.30);
-    const volume=envelope.gain;
-    volume.setValueAtTime(.00001,at);
-    volume.linearRampToValueAtTime(amp,at+attack);
-    if(grain){
-      // The bow keeps feeding the string, with a little movement in its pressure.
-      const heldGain=amp*(.79+.21*Math.exp(-(sustain-attack)/.30));
-      volume.setTargetAtTime(amp*.79,at+attack,.30);
-      volume.setValueAtTime(heldGain,at+sustain);
-    }else{
-      const snap=Math.min(.055,sustain*.60);
-      const ring=Math.min(.28,sustain);
-      // A two-stage release yields an immediate note and a quiet, pitched tail.
-      volume.exponentialRampToValueAtTime(amp*.33,at+snap);
-      volume.exponentialRampToValueAtTime(amp*.24,at+ring);
-      if(sustain>ring)volume.exponentialRampToValueAtTime(amp*.20,at+sustain);
-    }
-    volume.exponentialRampToValueAtTime(.00008,at+len);
-    volume.linearRampToValueAtTime(0,at+len+.002);
-    const g=grit.gain;
-    g.setValueAtTime(.00001,at);
-    if(grain){
-      const flutter=c.createOscillator(),amount=c.createGain();
-      flutter.frequency.value=flutterHz;amount.gain.value=.17;
-      flutter.connect(amount);amount.connect(presence.gain);
-      flutter.start(at);flutter.stop(end);v.sources.push(flutter);v.nodes.push(flutter,amount);
-      g.linearRampToValueAtTime(.008*power,at+attack);
-      g.setValueAtTime(.008*power,at+sustain);
-      g.exponentialRampToValueAtTime(.00001,at+len);
-    }else{
-      const contact=Math.min(.003,sustain*.16);
-      g.linearRampToValueAtTime(.15*power,at+contact);
-      g.exponentialRampToValueAtTime(.00001,at+Math.min(.022,len));
-    }
-    // The same strength shapes a soft pluck or a forceful initial strike.
-    const offset=((pitch*29+Math.round(power*37))%101)/101*.43;
-    brush.start(at,offset);brush.stop(gate!==undefined?at+len:grain?at+sustain+.045:at+.029);
-    for(const osc of [source,saw,overtone]){osc.start(at);osc.stop(end);}
-    source.onended=()=>closeVoice(v);
-    return v;
-  }
-
-  function fineBend(n){
-    return Number.isFinite(n.row)?12*clamp(n.row-n.pitch,-.5,.5):0;
-  }
-  function reedOpening(row,root){return clamp(.32+(row-root)/9,0,1);}
-  function bendVoice(v,n,at,live){
-    const cents=100*(semitone(n.pitch)-semitone(v.root))+fineBend(n);
-    if(!live||cents!==v.cents){
-      for(const osc of v.sources.slice(0,3)){
-        if(live)osc.detune.setTargetAtTime(cents,at,.006);
-        else osc.detune.linearRampToValueAtTime(cents,at);
+    function openContext(Constructor){
+      // Music is the primary output. Request media playback before Web Audio activates.
+      try {
+        const session = navigator.audioSession;
+        if (session && session.type !== 'playback') session.type = 'playback';
+      } catch {
+        // Audio Session is optional. The browser can still use its default behavior.
       }
-      v.cents=cents;
+      const next=new Constructor({latencyHint:'interactive'});
+      context=next;
+      next.addEventListener('statechange',()=>{
+        if(next===context && next===confirmedClock && next.state!=='running')interrupt();
+      });
+      makeMaterials(next);
+      return next;
     }
-    if(v.reed){
-      const hz=720+1050*reedOpening(n.row??n.pitch,v.root);
-      if(live)v.reed.frequency.setTargetAtTime(hz,at,.006);
-      else v.reed.frequency.linearRampToValueAtTime(hz,at);
-    }
-    const pitchChanged=v.pitch!==n.pitch;
-    v.frequency=frequencyFor(n.pitch);v.pitch=n.pitch;
-    if(pitchChanged || n.z!==v.z)depthSettings(v,n.z,effectsFor(n),at,live);
-  }
-  function audibleTime() {
-    const c=context;if(!c)return 0;
-    const ts=c.getOutputTimestamp?.();
-    if(ts && ts.performanceTime>0 && ts.contextTime>=0){
-      const deviceTime=ts.contextTime+(performance.now()-ts.performanceTime)*.001;
-      return clamp(deviceTime,0,c.currentTime);
-    }
-    return Math.max(0,c.currentTime-(c.outputLatency||c.baseLatency||.018));
-  }
-  function phase(){
-    const now=audibleTime();
-    if(solo)return clamp(solo.startX+(now-solo.at)/solo.stepLength,solo.startX,solo.endX);
-    const t=transport;if(!t)return 0;
-    for(let i=t.events.length-1;i>=0;i--){
-      const e=t.events[i];
-      if(e.at<=now)return (e.step+clamp((now-e.at)/e.length,0,.999999))%steps;
-    }
-    return 0;
-  }
-  function visuals(){
-    visualId=0;
-    const t=transport;if(!t)return;
-    const now=audibleTime();
-    for(const e of t.events){
-      if(!e.fired && e.at<=now){
-        e.fired=true;
-      }
-      for(const onset of e.onsets){
-        if(onset.fired || onset.at>now)continue;
-        onset.fired=true;
-        if(onset.track)onset.voice=onset.track.voice;
-        if(onset.skipped || (onset.voice && !onset.voice.silent && onset.voice.end>onset.at)){
-          t.config.onStep?.(e.step,onset.skipped?[]:[onset.id],onset.skipped?[onset.id]:[]);
+    function checkClock(c){
+      if(clockCheck?.context===c)return clockCheck.promise;
+      const origin=c.currentTime,start=performance.now();
+      // resume() can remain pending following an OS interruption. Poll the clock itself.
+      try{if(c.state!=='running')c.resume().catch(()=>{});}catch{}
+      const check={context:c};
+      clockCheck=check;
+      check.promise=new Promise(resolve=>{
+        function observe(){
+          if(c!==context || document.hidden){resolve(false);return;}
+          if(c.state==='running' && c.currentTime>origin){
+            confirmedClock=c;resolve(true);return;
+          }
+          if(c.state==='closed' || performance.now()-start>=650){resolve(false);return;}
+          setTimeout(observe,12);
         }
-        if(transport!==t)return;
-      }
+        observe();
+      }).finally(()=>{if(clockCheck===check)clockCheck=null;});
+      return check.promise;
     }
-    visualId=requestAnimationFrame(visuals);
-  }
-  const partCache=new WeakMap();
-  const clockX=point=>clamp(point.step+.5,0,steps);
-  function scoreParts(ink){
-    const cached=partCache.get(ink);
-    if(cached && cached.count===ink.length)return cached.parts;
-    const parts=[];
-    // Horizontal movement smaller than a few screen pixels is normal hand wobble.
-    const turnThreshold=.045,verticalWidth=.08;
-    function add(from,to,sign){
-      const first=sign<0?to:from,last=sign<0?from:to,direction=sign<0?-1:1;
-      let startX=steps,endX=0;
-      for(let i=from;i<=to;i++){
-        const x=clockX(ink[i]);startX=Math.min(x,startX);endX=Math.max(x,endX);
-      }
-      const positions=new Float64Array(to-from+1);
-      for(let k=1;k<positions.length;k++){
-        const i=first+k*direction,pt=ink[i],prev=ink[i-direction];
-        positions[k]=sign?Math.max(positions[k-1],clockX(pt)-startX):
-          positions[k-1]+Math.hypot(pt.pitch-prev.pitch,4*(pt.z-prev.z));
-      }
-      const total=positions[positions.length-1];
-      if(total>0)for(let k=1;k<positions.length;k++)positions[k]/=total;
-      parts.push({first,last,direction,startX,endX,vertical:!sign,positions});
+    function clockMoving(){
+      if(!context || context.state!=='running' || document.hidden)return false;
+      const tick=context.currentTime,now=performance.now();
+      if(tick!==lastTickTime || !lastTickAt){lastTickTime=tick;lastTickAt=now;}
+      return now-lastTickAt<700;
     }
-    function splitTurns(from,to){
-      let first=from,extreme=from,sign=0;
-      for(let i=from+1;i<=to;i++){
-        const x=clockX(ink[i]),dx=x-clockX(ink[extreme]);
-        if(!sign){
-          if(Math.abs(dx)>=turnThreshold){sign=Math.sign(dx);extreme=i;}
-        }else if(dx*sign>=0)extreme=i;
-        else if(Math.abs(dx)>=turnThreshold){
-          add(first,extreme,sign);first=extreme;extreme=i;sign=-sign;
+    async function unlock(checkProgress=false) {
+      if(document.hidden)return false;
+      const Constructor=window.AudioContext||window.webkitAudioContext;
+      if(!Constructor)return false;
+      if(!context && navigator.userActivation && !navigator.userActivation.hasBeenActive)return false;
+      try {
+        const previous=context;
+        const c=previous && previous.state!=='closed'?previous:openContext(Constructor);
+        if(c===confirmedClock && c.state==='running' && !checkProgress)return true;
+        if(await checkClock(c))return true;
+        if(c!==context || document.hidden)return false;
+        // A completed but motionless browser session needs a fresh audio graph.
+        retireContext();
+        return await checkClock(openContext(Constructor));
+      } catch {return false;}
+    }
+
+    function ensureBus(){if(!bus)bus=makeBus();return bus;}
+    function closeVoice(v) {
+      if(!voices.delete(v))return;
+      for(const node of v.nodes)node.disconnect();
+      if(preview===v)preview=null;
+    }
+    function hushVoice(v,fade=true){
+      if(!voices.has(v))return;
+      const t=context.currentTime;
+      v.end=Math.min(v.end,t+(fade?.008:0));
+      v.soundEnd=Math.min(v.soundEnd,v.end);
+      v.silent ||= v.start>=t;
+      if(fade && v.start<=t){
+        v.kill.gain.cancelScheduledValues(t);v.kill.gain.setValueAtTime(v.kill.gain.value,t);
+        v.kill.gain.linearRampToValueAtTime(0,t+.008);
+      }else v.kill.gain.value=0;
+      for(const src of v.sources){try{src.stop(t+(fade?.009:0));}catch{}}
+      if(!fade)closeVoice(v);
+    }
+
+    function depthSettings(v,z,fx,at,live=false) {
+      const d=unit(z),hasSpace=fx.includes('space'),hasTone=fx.includes('tone'),hasWave=fx.includes('wave');
+      const top=context.sampleRate*.45;
+      const space=hasSpace?d:0;
+      const brightness=hasTone?d:.49;
+      const toneLevel=hasTone?1.12-.09*brightness:1;
+      const dryLevel=v.hand ? .10+.94*(1-space)**2 : .16+.88*(1-space)**1.75;
+      const roomLevel=v.hand ? .40 : .62;
+      const airRatio=hasWave ? .68 : hasTone ? .37 : (v.hand ? .062 : .112);
+      // Fade from the fundamental into the richer string as depth opens the filter.
+      const brightBody=.07+.93*brightness;
+      const bodyLevel=hasWave ? .28+.72*(1-d) : (hasTone ? brightBody : 1);
+      const blendLevel=hasWave ? 1.46*d**.42 : (hasTone ? 1-brightBody : 0);
+      const params=[
+        [v.direct.gain,toneLevel*(hasSpace?dryLevel+(hasWave?.22*space:0):1)],
+        [v.wet.gain,toneLevel*(hasSpace?.014+roomLevel*space**1.20:(v.hand?0:.028))],
+        [v.preDelay.delayTime,.003+.087*space**1.38],
+        [v.air.frequency,Math.min(top,18800*Math.pow(airRatio,space))],
+        [v.colour.frequency,hasTone?Math.min(top,v.frequency*(1.03*2**(3.35*brightness))):Math.min(top,hasWave?14500:v.frequency*(v.grain?7:9))],
+        [v.shimmer.gain,(v.grain?.27:.50)*(hasTone?.55+.70*brightness:1)],
+        [v.body.gain,bodyLevel],
+        [v.sawGain.gain,blendLevel],
+        [v.bristleLevel.gain,hasWave?0:hasTone?.13+1.12*brightness:1]
+      ];
+      if(v.buzzFilter){
+        // Retain the teeth of the saw even at the darkest Brightness setting.
+        const harmonics=hasTone ? 9+25*brightness : 30;
+        params.push([v.buzzFilter.frequency,Math.min(top,v.frequency*harmonics)]);
+      }
+      if(v.echoSend)params.push([v.echoSend.gain,hasSpace?.29*space**1.7:0]);
+      for(const [p,value] of params){
+        if(live){p.cancelScheduledValues(at);p.setTargetAtTime(value,at,.006);}
+        else p.setValueAtTime(value,at);
+      }
+      v.z=d;
+    }
+
+    function noteSeconds(bpm){return 15/clamp(Number(bpm)||96,36,240);}
+    function holdEnd(note){
+      return Math.min(steps-.5,note.step+clamp(Math.round(Number(note.duration)||1),1,4));
+    }
+    function playNote(note,mode,at,seconds,gateSeconds) {
+      if(!context||(!renderingTake && context.state!=='running'))return null;
+      // Steal a voice on the audio clock, so a dense roll still gets its first notes.
+      const sounding=Array.from(voices).filter(v=>!v.silent && v.start<=at && v.soundEnd>at);
+      if(sounding.length>=voiceLimit){
+        const oldest=sounding.reduce((a,b)=>a.start<=b.start?a:b);
+        oldest.end=at;oldest.soundEnd=at;oldest.silent=at<=oldest.start;
+        const fade=oldest.silent?0:.004;
+        oldest.kill.gain.cancelScheduledValues(at);
+        oldest.kill.gain.setValueAtTime(oldest.silent?0:1,at);
+        oldest.kill.gain.linearRampToValueAtTime(0,at+fade);
+        for(const src of oldest.sources)src.stop(at+fade);
+      }
+      const c=context, dest=ensureBus(), grain=note.kind==='grain', fx=effectsFor(note,mode);
+      const pitch=clamp(Math.round(Number(note.pitch)||0),0,maxPitch);
+      const frequency=frequencyFor(pitch);
+      const power=.2+.8*unit(note.strength,.7);
+      const gate=note.phrase?seconds:gateSeconds;
+      const naturalRelease=grain?.115:.205;
+      const release=gate===undefined?naturalRelease:Math.min(note.phrase?.018:naturalRelease,gate*.20);
+      const sustain=gate===undefined?seconds*clamp(Math.round(Number(note.duration)||1),1,4):gate-release;
+      const len=sustain+release, end=at+len+.10;
+      const envelope=c.createGain(), source=c.createOscillator(), saw=c.createOscillator(), overtone=c.createOscillator();
+      const body=c.createGain(),shimmer=c.createGain(),colour=c.createBiquadFilter(),air=c.createBiquadFilter(),kill=c.createGain();
+      const direct=c.createGain(),wet=c.createGain(),preDelay=c.createDelay(.15),sawGain=c.createGain(),presence=c.createGain();
+      const brush=c.createBufferSource(), bristle=c.createBiquadFilter(), grit=c.createGain(),bristleLevel=c.createGain();
+      const v={attackId:++attackId,soundEnd:at+len,startIndex:note.sampleIndex??0,sampleIndex:note.sampleIndex??0,strength:unit(note.strength,.7),brushKind:note.brushKind,phrase:!!note.phrase,id:note.id,note:note.scoreNote||note,hand:!!(note.phrase||note.continuous||note.ink),group:note.group,continuous:!!note.continuous,start:at,end,silent:false,frequency,pitch,root:pitch,grain,fxKey:effectNames.filter(f=>fx.includes(f)).join('/'),
+        kill,direct,wet,air,colour,body,shimmer,preDelay,sawGain,bristleLevel,presence,
+        nodes:[envelope,source,saw,sawGain,overtone,body,shimmer,colour,air,presence,kill,direct,wet,preDelay,brush,bristle,grit,bristleLevel],sources:[source,saw,overtone,brush]};
+      voices.add(v);
+      if(fx.includes('tone'))source.setPeriodicWave(grain?brightBowWave:brightPluckWave);
+      else source.setPeriodicWave(grain?grainWave:pluckWave);
+      saw.type=fx.includes('tone') && !fx.includes('wave')?'sine':'sawtooth';
+      if(fx.includes('wave'))saw.setPeriodicWave(grain?reedBuzzWave:copperBuzzWave);
+      for(const osc of [source,saw]){
+        osc.frequency.setValueAtTime(frequency*(grain?1.0004:1.0025),at);
+        osc.frequency.exponentialRampToValueAtTime(frequency,at+.028);
+      }
+      overtone.type='sine';overtone.frequency.value=frequency*(grain?3:2);
+      for(const osc of [source,saw,overtone])osc.detune.setValueAtTime(0,at);
+      source.connect(body);body.connect(colour);saw.connect(sawGain);
+      if(fx.includes('wave')){
+        // Shape the saw independently of pluck damping, then share timing and room placement.
+        v.buzzFilter=c.createBiquadFilter();
+        v.buzzFilter.type='lowpass';v.buzzFilter.Q.value=.7;
+        sawGain.connect(v.buzzFilter);if(!grain)v.buzzFilter.connect(envelope);
+        v.nodes.push(v.buzzFilter);
+      }else sawGain.connect(colour);
+      // Keep the octave of the wire and the hollow third harmonic of the reed audible through depth changes.
+      overtone.connect(shimmer);shimmer.connect(envelope);
+      colour.type='lowpass';colour.Q.value=.71;
+      if(grain){
+        v.reed=c.createBiquadFilter();
+        v.reed.type='peaking';v.reed.Q.value=1.7;v.reed.gain.value=8;
+        v.reed.frequency.value=720+1050*reedOpening(note.row??pitch,pitch);
+        colour.connect(v.reed);
+        if(v.buzzFilter)v.buzzFilter.connect(v.reed);
+        v.reed.connect(envelope);v.nodes.push(v.reed);
+      }
+      else{
+        // The pluck sheds its high harmonics first, as the string loses energy.
+        const damping=c.createBiquadFilter();
+        damping.type='lowpass';
+        damping.Q.value=.56;
+        damping.frequency.setValueAtTime(Math.min(c.sampleRate*.42,7200+frequency*4),at);
+        damping.frequency.setTargetAtTime(Math.min(c.sampleRate*.42,920+frequency*3.4),at+.008,.048);
+        colour.connect(damping);
+        damping.connect(envelope);
+        v.nodes.push(damping);
+      }
+      envelope.connect(air);
+      air.type='lowpass';air.Q.value=.68;air.connect(presence);
+      if(note.phrase){
+        v.balance=c.createGain();v.nodes.push(v.balance);
+        presence.connect(v.balance);v.balance.connect(kill);
+      }else presence.connect(kill);
+      kill.connect(direct);kill.connect(wet);
+      if(c.createStereoPanner){
+        const pan=c.createStereoPanner();
+        pan.pan.value=grain?.24:-.24;
+        direct.connect(pan);pan.connect(dest.sum);v.nodes.push(pan);
+      }else direct.connect(dest.sum);
+      wet.connect(preDelay);preDelay.connect(dest.room);
+      if(v.hand && fx.includes('space')){
+        v.echoSend=c.createGain();kill.connect(v.echoSend);v.echoSend.connect(dest.wall);
+        v.nodes.push(v.echoSend);
+      }
+      depthSettings(v,note.z,fx,at);
+      if(Number.isFinite(note.row)){
+        for(const osc of [source,saw,overtone])osc.detune.setValueAtTime(fineBend(note),at);
+      }
+      brush.buffer=noise;brush.loop=true;bristle.type='bandpass';
+      bristle.frequency.value=grain?Math.min(620+frequency*3,3200):Math.min(650+frequency*2,3400);
+      bristle.Q.value=grain?1.3:.90;
+      brush.connect(bristle);bristle.connect(grit);grit.connect(bristleLevel);bristleLevel.connect(air);
+      const amp=(grain?.28:.57)*power;
+      const attack=Math.min(grain?.018:.0028,sustain*.30);
+      const volume=envelope.gain;
+      volume.setValueAtTime(.00001,at);
+      volume.linearRampToValueAtTime(amp,at+attack);
+      if(grain){
+        // The bow keeps feeding the string, with a little movement in its pressure.
+        const heldGain=amp*(.79+.21*Math.exp(-(sustain-attack)/.30));
+        volume.setTargetAtTime(amp*.79,at+attack,.30);
+        volume.setValueAtTime(heldGain,at+sustain);
+      }else{
+        const snap=Math.min(.055,sustain*.60);
+        const ring=Math.min(.28,sustain);
+        // A two-stage release yields an immediate note and a quiet, pitched tail.
+        volume.exponentialRampToValueAtTime(amp*.33,at+snap);
+        volume.exponentialRampToValueAtTime(amp*.24,at+ring);
+        if(sustain>ring)volume.exponentialRampToValueAtTime(amp*.20,at+sustain);
+      }
+      volume.exponentialRampToValueAtTime(.00008,at+len);
+      volume.linearRampToValueAtTime(0,at+len+.002);
+      const g=grit.gain;
+      g.setValueAtTime(.00001,at);
+      if(grain){
+        const flutter=c.createOscillator(),amount=c.createGain();
+        flutter.frequency.value=flutterHz;amount.gain.value=.17;
+        flutter.connect(amount);amount.connect(presence.gain);
+        flutter.start(at);flutter.stop(end);v.sources.push(flutter);v.nodes.push(flutter,amount);
+        g.linearRampToValueAtTime(.008*power,at+attack);
+        g.setValueAtTime(.008*power,at+sustain);
+        g.exponentialRampToValueAtTime(.00001,at+len);
+      }else{
+        const contact=Math.min(.003,sustain*.16);
+        g.linearRampToValueAtTime(.15*power,at+contact);
+        g.exponentialRampToValueAtTime(.00001,at+Math.min(.022,len));
+      }
+      // The same strength shapes a soft pluck or a forceful initial strike.
+      const offset=((pitch*29+Math.round(power*37))%101)/101*.43;
+      brush.start(at,offset);brush.stop(gate!==undefined?at+len:grain?at+sustain+.045:at+.029);
+      for(const osc of [source,saw,overtone]){osc.start(at);osc.stop(end);}
+      if(!renderingTake)source.onended=()=>closeVoice(v);
+      return v;
+    }
+
+    function fineBend(n){
+      return Number.isFinite(n.row)?12*clamp(n.row-n.pitch,-.5,.5):0;
+    }
+    function reedOpening(row,root){return clamp(.32+(row-root)/9,0,1);}
+    function bendVoice(v,n,at,live){
+      const cents=100*(semitone(n.pitch)-semitone(v.root))+fineBend(n);
+      if(!live||cents!==v.cents){
+        for(const osc of v.sources.slice(0,3)){
+          if(live)osc.detune.setTargetAtTime(cents,at,.006);
+          else osc.detune.linearRampToValueAtTime(cents,at);
+        }
+        v.cents=cents;
+      }
+      if(v.reed){
+        const hz=720+1050*reedOpening(n.row??n.pitch,v.root);
+        if(live)v.reed.frequency.setTargetAtTime(hz,at,.006);
+        else v.reed.frequency.linearRampToValueAtTime(hz,at);
+      }
+      const pitchChanged=v.pitch!==n.pitch;
+      v.frequency=frequencyFor(n.pitch);v.pitch=n.pitch;
+      if(pitchChanged || n.z!==v.z)depthSettings(v,n.z,effectsFor(n),at,live);
+    }
+    function audibleTime() {
+      const c=context;if(!c)return 0;
+      const ts=c.getOutputTimestamp?.();
+      if(ts && ts.performanceTime>0 && ts.contextTime>=0){
+        const deviceTime=ts.contextTime+(performance.now()-ts.performanceTime)*.001;
+        return clamp(deviceTime,0,c.currentTime);
+      }
+      return Math.max(0,c.currentTime-(c.outputLatency||c.baseLatency||.018));
+    }
+    function phase(){
+      const now=audibleTime();
+      if(solo)return clamp(solo.startX+(now-solo.at)/solo.stepLength,solo.startX,solo.endX);
+      const t=transport;if(!t)return 0;
+      for(let i=t.events.length-1;i>=0;i--){
+        const e=t.events[i];
+        if(e.at<=now)return (e.step+clamp((now-e.at)/e.length,0,.999999))%steps;
+      }
+      return 0;
+    }
+    function visuals(){
+      visualId=0;
+      const t=transport;if(!t)return;
+      const now=audibleTime();
+      for(const e of t.events){
+        if(!e.fired && e.at<=now){
+          e.fired=true;
+        }
+        for(const onset of e.onsets){
+          if(onset.fired || onset.at>now)continue;
+          onset.fired=true;
+          if(onset.track)onset.voice=onset.track.voice;
+          if(onset.skipped || (onset.voice && !onset.voice.silent && onset.voice.end>onset.at)){
+            t.config.onStep?.(e.step,onset.skipped?[]:[onset.id],onset.skipped?[onset.id]:[]);
+          }
+          if(transport!==t)return;
         }
       }
-      add(first,to,sign);
+      visualId=requestAnimationFrame(visuals);
     }
-    let low=steps,high=0;
-    for(const pt of ink){low=Math.min(low,clockX(pt));high=Math.max(high,clockX(pt));}
-    if(high-low<=verticalWidth)add(0,ink.length-1,0);
-    else{
-      // Separate a vertical side inside a wide shape, then split its remaining folds.
-      let from=0;
-      for(let i=1;i<ink.length;i++){
-        if(Math.abs(clockX(ink[i])-clockX(ink[i-1]))>=1e-7)continue;
-        const j=i-1;
-        let arc=0;
-        while(i<ink.length&&Math.abs(clockX(ink[i])-clockX(ink[j]))<1e-7){
-          arc+=Math.hypot(ink[i].pitch-ink[i-1].pitch,4*(ink[i].z-ink[i-1].z));i++;
+    const partCache=new WeakMap();
+    const clockX=point=>clamp(point.step+.5,0,steps);
+    function scoreParts(ink){
+      const cached=partCache.get(ink);
+      if(cached && cached.count===ink.length)return cached.parts;
+      const parts=[];
+      // Horizontal movement smaller than a few screen pixels is normal hand wobble.
+      const turnThreshold=.045,verticalWidth=.08;
+      function add(from,to,sign){
+        const first=sign<0?to:from,last=sign<0?from:to,direction=sign<0?-1:1;
+        let startX=steps,endX=0;
+        for(let i=from;i<=to;i++){
+          const x=clockX(ink[i]);startX=Math.min(x,startX);endX=Math.max(x,endX);
         }
-        i--;
-        if(arc<.4)continue;
-        if(from<j)splitTurns(from,j);
-        add(j,i,0);from=i;
+        const positions=new Float64Array(to-from+1);
+        for(let k=1;k<positions.length;k++){
+          const i=first+k*direction,pt=ink[i],prev=ink[i-direction];
+          positions[k]=sign?Math.max(positions[k-1],clockX(pt)-startX):
+            positions[k-1]+Math.hypot(pt.pitch-prev.pitch,4*(pt.z-prev.z));
+        }
+        const total=positions[positions.length-1];
+        if(total>0)for(let k=1;k<positions.length;k++)positions[k]/=total;
+        parts.push({first,last,direction,startX,endX,vertical:!sign,positions});
       }
-      if(from<ink.length-1)splitTurns(from,ink.length-1);
+      function splitTurns(from,to){
+        let first=from,extreme=from,sign=0;
+        for(let i=from+1;i<=to;i++){
+          const x=clockX(ink[i]),dx=x-clockX(ink[extreme]);
+          if(!sign){
+            if(Math.abs(dx)>=turnThreshold){sign=Math.sign(dx);extreme=i;}
+          }else if(dx*sign>=0)extreme=i;
+          else if(Math.abs(dx)>=turnThreshold){
+            add(first,extreme,sign);first=extreme;extreme=i;sign=-sign;
+          }
+        }
+        add(first,to,sign);
+      }
+      let low=steps,high=0;
+      for(const pt of ink){low=Math.min(low,clockX(pt));high=Math.max(high,clockX(pt));}
+      if(high-low<=verticalWidth)add(0,ink.length-1,0);
+      else{
+        // Separate a vertical side inside a wide shape, then split its remaining folds.
+        let from=0;
+        for(let i=1;i<ink.length;i++){
+          if(Math.abs(clockX(ink[i])-clockX(ink[i-1]))>=1e-7)continue;
+          const j=i-1;
+          let arc=0;
+          while(i<ink.length&&Math.abs(clockX(ink[i])-clockX(ink[j]))<1e-7){
+            arc+=Math.hypot(ink[i].pitch-ink[i-1].pitch,4*(ink[i].z-ink[i-1].z));i++;
+          }
+          i--;
+          if(arc<.4)continue;
+          if(from<j)splitTurns(from,j);
+          add(j,i,0);from=i;
+        }
+        if(from<ink.length-1)splitTurns(from,ink.length-1);
+      }
+      partCache.set(ink,{count:ink.length,parts});
+      return parts;
     }
-    partCache.set(ink,{count:ink.length,parts});
-    return parts;
-  }
-  function windowFor(part,stepLength){
-    if(!part.vertical)return {start:part.startX,end:part.endX};
-    // A zero-width mark needs a short audible gesture. Keep even the last dot inside the bar.
-    const grace=Math.min(.040/stepLength,.25);
-    const start=Math.min(part.startX,steps-grace);
-    return {start,end:start+grace};
-  }
-  function openTrack(owner,part,at,duration,soloPreview){
-    const chance=effectsFor(owner).includes('chance');
-    const skipped=!soloPreview && chance && Math.random()>=2**(-4*unit(owner.ink[part.first].z));
-    const track={owner,ink:owner.ink,part,at,duration,skipped,started:false,cancelled:false};
-    tracks.add(track);
-    return track;
-  }
-  function indexAt(track,offset){
-    const {positions,first,last,direction}=track.part;
-    const target=clamp(offset/track.duration,0,1);
-    if(target<=0||first===last)return first;
-    if(target>=1)return last;
-    let lo=0,hi=positions.length-1;
-    while(lo+1<hi){
-      const mid=(lo+hi)>>1;
-      if(positions[mid]<=target)lo=mid;else hi=mid;
+    function windowFor(part,stepLength){
+      if(!part.vertical)return {start:part.startX,end:part.endX};
+      // A zero-width mark needs a short audible gesture. Keep even the last dot inside the bar.
+      const grace=Math.min(.040/stepLength,.25);
+      const start=Math.min(part.startX,steps-grace);
+      return {start,end:start+grace};
     }
-    const span=positions[hi]-positions[lo];
-    const fraction=span>0?clamp((target-positions[lo])/span,0,1):0;
-    return first+direction*(lo+fraction);
-  }
-  function atIndex(track,index){
-    const i=Math.floor(index),f=index-i,a=track.ink[i],b=track.ink[Math.min(i+1,track.ink.length-1)];
-    const row=clamp(a.pitch+(b.pitch-a.pitch)*f,0,maxPitch);
-    return {row,pitch:Math.round(row),z:unit(a.z+(b.z-a.z)*f),fx:track.owner.fx};
-  }
-  // Share a stroke's level among the pitches it actually sounds at each crossing.
-  function branchLevels(now,horizon){
-    const groups=new Map();
-    for(const track of tracks){
+    function openTrack(owner,part,at,duration,soloPreview){
+      const chance=effectsFor(owner).includes('chance');
+      const skipped=!soloPreview && chance && Math.random()>=2**(-4*unit(owner.ink[part.first].z));
+      const track={owner,ink:owner.ink,part,at,duration,skipped,started:false,cancelled:false};
+      tracks.add(track);
+      return track;
+    }
+    function indexAt(track,offset){
+      const {positions,first,last,direction}=track.part;
+      const target=clamp(offset/track.duration,0,1);
+      if(target<=0||first===last)return first;
+      if(target>=1)return last;
+      let lo=0,hi=positions.length-1;
+      while(lo+1<hi){
+        const mid=(lo+hi)>>1;
+        if(positions[mid]<=target)lo=mid;else hi=mid;
+      }
+      const span=positions[hi]-positions[lo];
+      const fraction=span>0?clamp((target-positions[lo])/span,0,1):0;
+      return first+direction*(lo+fraction);
+    }
+    function atIndex(track,index){
+      const i=Math.floor(index),f=index-i,a=track.ink[i],b=track.ink[Math.min(i+1,track.ink.length-1)];
+      const row=clamp(a.pitch+(b.pitch-a.pitch)*f,0,maxPitch);
+      return {row,pitch:Math.round(row),z:unit(a.z+(b.z-a.z)*f),fx:track.owner.fx};
+    }
+    // Share a stroke's level among the pitches it actually sounds at each crossing.
+    function branchLevels(now,horizon){
+      const groups=new Map();
+      for(const track of tracks){
+        const end=track.at+track.duration;
+        if(track.skipped||track.cancelled||track.at>=horizon||end<=now||track.voice?.silent)continue;
+        const key=track.owner.group;
+        if(!groups.has(key))groups.set(key,new Map());
+        const changes=groups.get(key);
+        for(const [at,delta] of [[Math.max(now,track.at),1],[end,-1]]){
+          if(at<horizon)changes.set(at,(changes.get(at)??0)+delta);
+        }
+      }
+      const levels=new Map();
+      for(const [group,changes] of groups){
+        let active=0;
+        const points=[];
+        for(const [at,delta] of [...changes].sort((a,b)=>a[0]-b[0])){
+          active+=delta;
+          if(active)points.push({at,gain:1/Math.sqrt(active)});
+        }
+        levels.set(group,points);
+      }
+      return levels;
+    }
+    function balanceBranch(track,points,now,horizon){
+      const from=Math.max(now,track.at,track.balanceUntil??0),end=track.at+track.duration;
+      const level=track.voice.balance.gain;
+      function set(gain,at){
+        if(track.branchGain===gain)return;
+        if(track.branchGain===undefined)level.setValueAtTime(gain,at);
+        else level.setTargetAtTime(gain,at,gain < track.branchGain ? .010 : .055);
+        track.branchGain=gain;
+      }
+      if(from>=end||from>=horizon)return;
+      let current=1;
+      for(const point of points){
+        if(point.at>from)break;
+        current=point.gain;
+      }
+      set(current,from);
+      for(const point of points){
+        if(point.at>from&&point.at<end)set(point.gain,point.at);
+      }
+      track.balanceUntil=horizon;
+    }
+    function beginContour(track,start){
+      track.started=true;
+      const point=atIndex(track,indexAt(track,start-track.at));
+      const note={...track.owner,...point,scoreNote:track.owner,phrase:true,duration:1};
+      track.voice=playNote(note,note.fx,start,track.at+track.duration-start);
+      track.nextControl=start;
+    }
+    function automateContour(track,now,horizon,onPitch){
       const end=track.at+track.duration;
-      if(track.skipped||track.cancelled||track.at>=horizon||end<=now||track.voice?.silent)continue;
-      const key=track.owner.group;
-      if(!groups.has(key))groups.set(key,new Map());
-      const changes=groups.get(key);
-      for(const [at,delta] of [[Math.max(now,track.at),1],[end,-1]]){
-        if(at<horizon)changes.set(at,(changes.get(at)??0)+delta);
-      }
-    }
-    const levels=new Map();
-    for(const [group,changes] of groups){
-      let active=0;
-      const points=[];
-      for(const [at,delta] of [...changes].sort((a,b)=>a[0]-b[0])){
-        active+=delta;
-        if(active)points.push({at,gain:1/Math.sqrt(active)});
-      }
-      levels.set(group,points);
-    }
-    return levels;
-  }
-  function balanceBranch(track,points,now,horizon){
-    const from=Math.max(now,track.at,track.balanceUntil??0),end=track.at+track.duration;
-    const level=track.voice.balance.gain;
-    function set(gain,at){
-      if(track.branchGain===gain)return;
-      if(track.branchGain===undefined)level.setValueAtTime(gain,at);
-      else level.setTargetAtTime(gain,at,gain < track.branchGain ? .010 : .055);
-      track.branchGain=gain;
-    }
-    if(from>=end||from>=horizon)return;
-    let current=1;
-    for(const point of points){
-      if(point.at>from)break;
-      current=point.gain;
-    }
-    set(current,from);
-    for(const point of points){
-      if(point.at>from&&point.at<end)set(point.gain,point.at);
-    }
-    track.balanceUntil=horizon;
-  }
-  function runContours(now){
-    const horizon=now+lookAhead,heard=audibleTime();
-    const levels=branchLevels(now,horizon);
-    for(const track of tracks){
-      const end=track.at+track.duration;
-      if(track.cancelled||heard>end+.012){tracks.delete(track);continue;}
-      if(track.skipped||track.at>=horizon||end<=now)continue;
-      if(!track.started){
-        track.started=true;
-        const start=Math.max(track.at,now);
-        const point=atIndex(track,indexAt(track,start-track.at));
-        const note={...track.owner,...point,scoreNote:track.owner,phrase:true,duration:1};
-        track.voice=playNote(note,note.fx,start,end-start);
-        track.nextControl=start;
-      }
-      if(!track.voice||track.voice.silent)continue;
-      balanceBranch(track,levels.get(track.owner.group),now,horizon);
       // Short vertical sweeps still reach their last pitch during the attack.
       const interval=Math.min(.008,track.duration/12),lastControl=end-Math.min(.002,interval*.5);
       let time=Math.max(now,track.nextControl);
       while(time<Math.min(horizon,lastControl)){
         const pt=atIndex(track,indexAt(track,time-track.at));
-        bendVoice(track.voice,pt,time,false);time+=interval;
+        bendVoice(track.voice,pt,time,false);
+        onPitch?.(pt.pitch,time);
+        time+=interval;
       }
       track.nextControl=time;
       if(!track.finalBend && lastControl<horizon){
-        bendVoice(track.voice,atIndex(track,track.part.last),Math.max(now,lastControl),false);
+        const point=atIndex(track,track.part.last), time=Math.max(now,lastControl);
+        bendVoice(track.voice,point,time,false);
+        onPitch?.(point.pitch,time);
         track.finalBend=true;
       }
     }
-  }
-  function traces(){
-    if(!context||context.state!=='running')return [];
-    const now=audibleTime(),result=[];
-    function contact(v){
-      return {id:v.id,group:v.group,attackId:v.attackId,brushKind:v.brushKind,strength:v.strength,
-        opening:reedOpening(v.pitch,v.root),startIndex:v.startIndex,sampleIndex:v.sampleIndex,direction:1,z:v.z,age:now-v.start,duration:v.soundEnd-v.start};
+    function runContours(now){
+      const horizon=now+lookAhead,heard=audibleTime();
+      const levels=branchLevels(now,horizon);
+      for(const track of tracks){
+        const end=track.at+track.duration;
+        if(track.cancelled||heard>end+.012){tracks.delete(track);continue;}
+        if(track.skipped||track.at>=horizon||end<=now)continue;
+        if(!track.started)beginContour(track,Math.max(track.at,now));
+        if(!track.voice||track.voice.silent)continue;
+        balanceBranch(track,levels.get(track.owner.group),now,horizon);
+        automateContour(track,now,horizon);
+      }
     }
-    for(const track of tracks){
-      const offset=now-track.at;
-      if(track.cancelled||offset<0||offset>=track.duration||!track.voice||track.voice.silent||track.voice.end<=now)continue;
-      const sampleIndex=indexAt(track,offset);
-      const point=atIndex(track,sampleIndex);
-      result.push({...contact(track.voice),opening:reedOpening(point.row,track.voice.root),sampleIndex,startIndex:track.part.first,direction:track.part.direction,z:point.z});
+    function traces(){
+      if(!context||context.state!=='running')return [];
+      const now=audibleTime(),result=[];
+      function contact(v){
+        return {id:v.id,group:v.group,attackId:v.attackId,brushKind:v.brushKind,strength:v.strength,
+          opening:reedOpening(v.pitch,v.root),startIndex:v.startIndex,sampleIndex:v.sampleIndex,direction:1,z:v.z,age:now-v.start,duration:v.soundEnd-v.start};
+      }
+      for(const track of tracks){
+        const offset=now-track.at;
+        if(track.cancelled||offset<0||offset>=track.duration||!track.voice||track.voice.silent||track.voice.end<=now)continue;
+        const sampleIndex=indexAt(track,offset);
+        const point=atIndex(track,sampleIndex);
+        result.push({...contact(track.voice),opening:reedOpening(point.row,track.voice.root),sampleIndex,startIndex:track.part.first,direction:track.part.direction,z:point.z});
+      }
+      for(const voice of voices){
+        if(!voice.phrase && !voice.silent && now>=voice.start && now<voice.soundEnd)result.push(contact(voice));
+      }
+      return result;
     }
-    for(const voice of voices){
-      if(!voice.phrase && !voice.silent && now>=voice.start && now<voice.soundEnd)result.push(contact(voice));
-    }
-    return result;
-  }
-  function phraseEvents(notes,step,at,length,mode){
-    const events=[];
-    for(const n of notes){
-      if(n.ink?.length){
-        for(const part of scoreParts(n.ink)){
-          const span=windowFor(part,length);
-          if(Math.floor(span.start)!==step)continue;
-          const onset=at+(span.start-step)*length;
-          const track=openTrack(n,part,onset,(span.end-span.start)*length,false);
-          let hit=n;
-          for(const member of notes){
-            if(member.group===n.group&&member.sampleIndex<=part.first)hit=member;
+    function phraseEvents(notes,step,at,length,mode){
+      const events=[];
+      for(const n of notes){
+        if(n.ink?.length){
+          for(const part of scoreParts(n.ink)){
+            const span=windowFor(part,length);
+            if(Math.floor(span.start)!==step)continue;
+            const onset=at+(span.start-step)*length;
+            const track=openTrack(n,part,onset,(span.end-span.start)*length,false);
+            let hit=n;
+            for(const member of notes){
+              if(member.group===n.group&&member.sampleIndex<=part.first)hit=member;
+            }
+            events.push({id:hit.id,note:hit,at:onset,scheduled:true,skipped:track.skipped,track,fired:false});
           }
-          events.push({id:hit.id,note:hit,at:onset,scheduled:true,skipped:track.skipped,track,fired:false});
+        }else if(n.sampleIndex===undefined && n.step===step){
+          const fx=effectsFor(n,mode);
+          const skipped=fx.includes('chance') && Math.random()>=2**(-4*unit(n.z));
+          events.push({id:n.id,note:n,mode,at:at+.5*length,seconds:length,gateSeconds:(holdEnd(n)-n.step)*length,skipped,fired:false,scheduled:false});
         }
-      }else if(n.sampleIndex===undefined && n.step===step){
-        const fx=effectsFor(n,mode);
-        const skipped=fx.includes('chance') && Math.random()>=2**(-4*unit(n.z));
-        events.push({id:n.id,note:n,mode,at:at+.5*length,seconds:length,gateSeconds:(holdEnd(n)-n.step)*length,skipped,fired:false,scheduled:false});
       }
+      return events;
     }
-    return events;
-  }
-  function schedule(){
-    const t=transport;if(!t)return;
-    if(!clockMoving()){interrupt();return;}
-    const now=context.currentTime,config=t.config;
-    if(t.nextTime<now-.015){
-      const length=t.stepLength??noteSeconds(config.getBpm());
-      const missed=Math.floor((now-t.nextTime)/length);
-      t.nextTime+=missed*length;t.nextStep=(t.nextStep+missed)%steps;
+    function playOnset(onset,now) {
+      if(onset.skipped || onset.at+onset.gateSeconds<=now)return;
+      const at=Math.max(now,onset.at);
+      onset.voice=playNote(onset.note,onset.mode,at,onset.seconds,Math.max(.001,onset.gateSeconds-(at-onset.at)));
     }
-    while(t.nextTime<now+lookAhead){
-      const step=t.nextStep,mode=config.getMode?.();
-      if(step===0||!t.stepLength)t.stepLength=noteSeconds(config.getBpm());
-      const length=t.stepLength;
-      const onsets=phraseEvents(config.getNotes(),step,t.nextTime,length,mode);
-      const e={step,at:t.nextTime,length,onsets,fired:false};
-      t.events.push(e);t.nextTime+=length;t.nextStep=(step+1)%steps;
-    }
-    for(const e of t.events){
-      for(const onset of e.onsets){
-        if(onset.scheduled||onset.at>=now+lookAhead)continue;
-        onset.scheduled=true;
-        if(onset.at+onset.gateSeconds<=now)continue;
-        const at=Math.max(now,onset.at);
-        if(!onset.skipped)onset.voice=playNote(onset.note,onset.mode,at,onset.seconds,Math.max(.001,onset.gateSeconds-(at-onset.at)));
-      }
-    }
-    runContours(now);
-    while(t.events.length>2 && t.events[0].fired && t.events[0].onsets.every(n=>n.fired) && t.events[0].at<now-.3)t.events.shift();
-  }
-  function reconcile(notes,editedGroup){
-    const current=new Map(notes.map(n=>[n.id,n])),changed=new Set();
-    if(editedGroup!==undefined)changed.add(editedGroup);
-    function changedNote(old){
-      if(!old.id)return false; // Standalone palette sample.
-      const n=current.get(old.id);
-      if(n===old)return false;
-      const pathChanged=n?.ink!==old.ink && (n?.ink?.length!==old.ink?.length ||
-        old.ink?.some((pt,i)=>pt.step!==n.ink[i].step||pt.pitch!==n.ink[i].pitch||pt.z!==n.ink[i].z));
-      return !n || pathChanged || n.step!==old.step || n.pitch!==old.pitch || n.z!==old.z ||
-        n.kind!==old.kind || n.duration!==old.duration || n.strength!==old.strength ||
-        effectNames.some(key=>n.fx?.includes(key)!==old.fx?.includes(key));
-    }
-    for(const track of tracks){
-      if(changed.has(track.owner.group)||changedNote(track.owner)){
-        if(solo?.tracks.includes(track))cancelReplay();
-        track.cancelled=true;tracks.delete(track);
-      }
-    }
-    const beats=transport?.events??[];
-    for(const beat of beats){
-      for(const onset of beat.onsets)if(changedNote(onset.note))changed.add(onset.note.group);
-    }
-    if(pendingPreview && (changed.has(pendingPreview.note.group)||changedNote(pendingPreview.note))){
-      clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;
-    }
-    for(const v of voices){
-      if(changed.has(v.group)||changedNote(v.note))hushVoice(v);
-    }
-    for(const beat of beats){
-      for(const onset of beat.onsets){
-        if(changed.has(onset.note.group)){onset.scheduled=true;onset.fired=true;}
-      }
-    }
-  }
-  function resetRoom(){
-    if(!bus)return;
-    for(const node of bus.nodes)node.disconnect();
-    bus=null;
-  }
-  function stop(){
-    const wasPlaying=!!transport;cancelReplay();tracks.clear();
-    transport=null;clearInterval(intervalId);intervalId=0;
-    cancelAnimationFrame(visualId);visualId=0;
-    clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;lastPreview=-Infinity;
-    for(const v of Array.from(voices))hushVoice(v,false);
-    resetRoom();
-    preview=null;
-    if(wasPlaying)window.dispatchEvent(new Event('carbontransportstop'));
-  }
-  function start(config){
-    if(transport||!context||context.state!=='running'||document.hidden)return false;
-    if(!config || ['getNotes','getBpm'].some(key=>typeof config[key]!=='function'))return false;
-    cancelReplay();endAudition();
-    transport={config,nextStep:0,nextTime:context.currentTime+.042,events:[]};
-    schedule();intervalId=setInterval(schedule,21);visualId=requestAnimationFrame(visuals);return true;
-  }
-  function runPreview(){
-    previewTimer=0;const requested=pendingPreview;pendingPreview=null;
-    if(!requested||document.hidden||!context||context.state!=='running')return;
-    if(preview)hushVoice(preview);
-    lastPreview=performance.now();
-    const bpm=requested.bpm??transport?.config.getBpm()??92;
-    const seconds=requested.note.continuous?20:noteSeconds(bpm);
-    const n=requested.note;
-    const gate=n.id>0&&!n.continuous&&n.sampleIndex===undefined?(holdEnd(n)-n.step)*seconds:undefined;
-    preview=playNote(n,requested.mode,context.currentTime+.004,seconds,gate);
-  }
-  function audition(note,mode,bpm){
-    if(!note||document.hidden||!context||context.state!=='running')return;
-    const elapsed=performance.now()-lastPreview,fx=effectsFor(note,mode);
-    if(note.continuous&&!note.reattack&&preview?.continuous&&note.group===preview.group&&preview.end>context.currentTime+.14){
-      clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;
-      preview.sampleIndex=note.sampleIndex??preview.sampleIndex;
-      bendVoice(preview,note,Math.max(context.currentTime,preview.start),true);
-      return;
-    }
-    const same=preview?.id===note.id&&preview.pitch===note.pitch&&preview.grain===(note.kind==='grain')&&
-      preview.fxKey===effectNames.filter(f=>fx.includes(f)).join('/');
-    const z=unit(note.z),endpoint=same&&z!==preview.z&&(z===0||z===1);
-    if(same)depthSettings(preview,z,fx,context.currentTime,true);
-    pendingPreview={note:{...note,fx:[...fx]},mode,bpm};
-    if(note.reattack||elapsed>=95||!same||endpoint){clearTimeout(previewTimer);runPreview();}
-    else if(!previewTimer)previewTimer=setTimeout(runPreview,95-elapsed);
-  }
-
-  function endAudition(){
-    clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;
-    if(preview){hushVoice(preview);preview=null;}
-  }
-  function cancelReplay(){
-    if(!solo)return;
-    const replay=solo;solo=null;clearInterval(replay.timer);
-    for(const track of replay.tracks){
-      tracks.delete(track);track.cancelled=true;
-      if(track.voice)hushVoice(track.voice);
-    }
-    resetRoom();
-  }
-  function replayStroke(members,bpm,onDone){
-    cancelReplay();endAudition();
-    const owner=members.find(n=>n.ink?.length);
-    if(transport||!context||context.state!=='running'||document.hidden||!owner)return false;
-    const at=context.currentTime+.012,stepLength=noteSeconds(bpm);
-    const ranges=scoreParts(owner.ink).map(part=>({part,...windowFor(part,stepLength)}));
-    let startX=steps,endX=0;
-    for(const span of ranges){startX=Math.min(startX,span.start);endX=Math.max(endX,span.end);}
-    const played=ranges.map(({part,start,end})=>openTrack(owner,part,at+(start-startX)*stepLength,(end-start)*stepLength,true));
-    const timer=setInterval(()=>{
+    function schedule(){
+      const t=transport;if(!t)return;
       if(!clockMoving()){interrupt();return;}
-      runContours(context.currentTime);
-      if(audibleTime()>=at+(endX-startX)*stepLength){
-        clearInterval(timer);solo=null;
-        for(const track of played)tracks.delete(track);
-        onDone?.();
+      const now=context.currentTime,config=t.config;
+      if(t.nextTime<now-.015){
+        const length=t.stepLength??noteSeconds(config.getBpm());
+        const missed=Math.floor((now-t.nextTime)/length);
+        t.nextTime+=missed*length;t.nextStep=(t.nextStep+missed)%steps;
       }
-    },18);
-    solo={tracks:played,timer,at,startX,endX,stepLength};runContours(context.currentTime);return true;
+      while(t.nextTime<now+lookAhead){
+        const step=t.nextStep,mode=config.getMode?.();
+        if(step===0||!t.stepLength)t.stepLength=noteSeconds(config.getBpm());
+        const length=t.stepLength;
+        const onsets=phraseEvents(config.getNotes(),step,t.nextTime,length,mode);
+        const e={step,at:t.nextTime,length,onsets,fired:false};
+        t.events.push(e);t.nextTime+=length;t.nextStep=(step+1)%steps;
+      }
+      for(const e of t.events){
+        for(const onset of e.onsets){
+          if(onset.scheduled||onset.at>=now+lookAhead)continue;
+          onset.scheduled=true;
+          playOnset(onset,now);
+        }
+      }
+      runContours(now);
+      while(t.events.length>2 && t.events[0].fired && t.events[0].onsets.every(n=>n.fired) && t.events[0].at<now-.3)t.events.shift();
+    }
+    function reconcile(notes,editedGroup){
+      const current=new Map(notes.map(n=>[n.id,n])),changed=new Set();
+      if(editedGroup!==undefined)changed.add(editedGroup);
+      function changedNote(old){
+        if(!old.id)return false; // Standalone palette sample.
+        const n=current.get(old.id);
+        if(n===old)return false;
+        const pathChanged=n?.ink!==old.ink && (n?.ink?.length!==old.ink?.length ||
+          old.ink?.some((pt,i)=>pt.step!==n.ink[i].step||pt.pitch!==n.ink[i].pitch||pt.z!==n.ink[i].z));
+        return !n || pathChanged || n.step!==old.step || n.pitch!==old.pitch || n.z!==old.z ||
+          n.kind!==old.kind || n.duration!==old.duration || n.strength!==old.strength ||
+          effectNames.some(key=>n.fx?.includes(key)!==old.fx?.includes(key));
+      }
+      for(const track of tracks){
+        if(changed.has(track.owner.group)||changedNote(track.owner)){
+          if(solo?.tracks.includes(track))cancelReplay();
+          track.cancelled=true;tracks.delete(track);
+        }
+      }
+      const beats=transport?.events??[];
+      for(const beat of beats){
+        for(const onset of beat.onsets)if(changedNote(onset.note))changed.add(onset.note.group);
+      }
+      if(pendingPreview && (changed.has(pendingPreview.note.group)||changedNote(pendingPreview.note))){
+        clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;
+      }
+      for(const v of voices){
+        if(changed.has(v.group)||changedNote(v.note))hushVoice(v);
+      }
+      for(const beat of beats){
+        for(const onset of beat.onsets){
+          if(changed.has(onset.note.group)){onset.scheduled=true;onset.fired=true;}
+        }
+      }
+    }
+    function resetRoom(){
+      if(!bus)return;
+      for(const node of bus.nodes)node.disconnect();
+      bus=null;
+    }
+    function stop(){
+      const wasPlaying=!!transport;cancelReplay();tracks.clear();
+      transport=null;clearInterval(intervalId);intervalId=0;
+      cancelAnimationFrame(visualId);visualId=0;
+      clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;lastPreview=-Infinity;
+      for(const v of Array.from(voices))hushVoice(v,false);
+      resetRoom();
+      preview=null;
+      if(wasPlaying)window.dispatchEvent(new Event('carbontransportstop'));
+    }
+    function start(config){
+      if(transport||!context||context.state!=='running'||document.hidden)return false;
+      if(!config || ['getNotes','getBpm'].some(key=>typeof config[key]!=='function'))return false;
+      cancelReplay();endAudition();
+      transport={config,nextStep:0,nextTime:context.currentTime+.042,events:[]};
+      schedule();intervalId=setInterval(schedule,21);visualId=requestAnimationFrame(visuals);return true;
+    }
+    function runPreview(){
+      previewTimer=0;const requested=pendingPreview;pendingPreview=null;
+      if(!requested||document.hidden||!context||context.state!=='running')return;
+      if(preview)hushVoice(preview);
+      lastPreview=performance.now();
+      const bpm=requested.bpm??transport?.config.getBpm()??92;
+      const seconds=requested.note.continuous?20:noteSeconds(bpm);
+      const n=requested.note;
+      const gate=n.id>0&&!n.continuous&&n.sampleIndex===undefined?(holdEnd(n)-n.step)*seconds:undefined;
+      preview=playNote(n,requested.mode,context.currentTime+.004,seconds,gate);
+    }
+    function audition(note,mode,bpm){
+      if(!note||document.hidden||!context||context.state!=='running')return;
+      const elapsed=performance.now()-lastPreview,fx=effectsFor(note,mode);
+      if(note.continuous&&!note.reattack&&preview?.continuous&&note.group===preview.group&&preview.end>context.currentTime+.14){
+        clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;
+        preview.sampleIndex=note.sampleIndex??preview.sampleIndex;
+        bendVoice(preview,note,Math.max(context.currentTime,preview.start),true);
+        return;
+      }
+      const same=preview?.id===note.id&&preview.pitch===note.pitch&&preview.grain===(note.kind==='grain')&&
+        preview.fxKey===effectNames.filter(f=>fx.includes(f)).join('/');
+      const z=unit(note.z),endpoint=same&&z!==preview.z&&(z===0||z===1);
+      if(same)depthSettings(preview,z,fx,context.currentTime,true);
+      pendingPreview={note:{...note,fx:[...fx]},mode,bpm};
+      if(note.reattack||elapsed>=95||!same||endpoint){clearTimeout(previewTimer);runPreview();}
+      else if(!previewTimer)previewTimer=setTimeout(runPreview,95-elapsed);
+    }
+
+    function endAudition(){
+      clearTimeout(previewTimer);previewTimer=0;pendingPreview=null;
+      if(preview){hushVoice(preview);preview=null;}
+    }
+    function cancelReplay(){
+      if(!solo)return;
+      const replay=solo;solo=null;clearInterval(replay.timer);
+      for(const track of replay.tracks){
+        tracks.delete(track);track.cancelled=true;
+        if(track.voice)hushVoice(track.voice);
+      }
+      resetRoom();
+    }
+    function replayStroke(members,bpm,onDone){
+      cancelReplay();endAudition();
+      const owner=members.find(n=>n.ink?.length);
+      if(transport||!context||context.state!=='running'||document.hidden||!owner)return false;
+      const at=context.currentTime+.012,stepLength=noteSeconds(bpm);
+      const ranges=scoreParts(owner.ink).map(part=>({part,...windowFor(part,stepLength)}));
+      let startX=steps,endX=0;
+      for(const span of ranges){startX=Math.min(startX,span.start);endX=Math.max(endX,span.end);}
+      const played=ranges.map(({part,start,end})=>openTrack(owner,part,at+(start-startX)*stepLength,(end-start)*stepLength,true));
+      const timer=setInterval(()=>{
+        if(!clockMoving()){interrupt();return;}
+        runContours(context.currentTime);
+        if(audibleTime()>=at+(endX-startX)*stepLength){
+          clearInterval(timer);solo=null;
+          for(const track of played)tracks.delete(track);
+          onDone?.();
+        }
+      },18);
+      solo={tracks:played,timer,at,startX,endX,stepLength};runContours(context.currentTime);return true;
+    }
+
+    async function renderTake(notes,bpm){
+      const OfflineContext=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+      if(!OfflineContext)throw new Error('Offline audio is unavailable');
+      const sampleRate=44100;
+      const length=noteSeconds(bpm);
+      const passes=4;
+      const duration=passes*steps*length;
+      // The room impulse is 1.72 seconds and the longest pre-delay is 90 ms.
+      const tail=1.85;
+      context=new OfflineContext(2,Math.ceil((duration+tail)*sampleRate),sampleRate);
+      makeMaterials(context);
+      const onsets=[];
+      for(let i=0;i<passes*steps;i++){
+        const beat=phraseEvents(notes,i%steps,i*length,length,'space');
+        for(const onset of beat){
+          if(!onset.skipped)onsets.push(onset);
+        }
+      }
+      onsets.sort((a,b)=>a.at-b.at);
+      for(const onset of onsets){
+        // Prune bookkeeping without disconnecting nodes before offline rendering.
+        for(const voice of voices){
+          if(voice.end<=onset.at)voices.delete(voice);
+        }
+        if(onset.track)beginContour(onset.track,onset.at);
+        else playOnset(onset,0);
+      }
+      const horizon=duration+tail;
+      const levels=branchLevels(0,horizon);
+      const midiNotes=[];
+      for(const onset of onsets){
+        const track=onset.track;
+        const voice=track?.voice ?? onset.voice;
+        if(!voice || voice.silent || voice.soundEnd<=voice.start)continue;
+        const kind=voice.grain?'grain':'pluck';
+        const velocity=Math.round(25+102*voice.strength);
+        let pitch=voice.root, start=voice.start;
+        function closeNote(end){
+          if(end>start)midiNotes.push({kind, pitch:38+semitone(pitch), start, end, velocity});
+        }
+        if(track){
+          balanceBranch(track,levels.get(track.owner.group),0,horizon);
+          automateContour(track,0,horizon,(next,at)=>{
+            if(next===pitch || at>=voice.soundEnd)return;
+            closeNote(at);
+            pitch=next;
+            start=at;
+          });
+        }
+        closeNote(voice.soundEnd);
+      }
+      return {audio:await context.startRendering(),notes:midiNotes,bpm:15/length,duration};
+    }
+
+    return {
+      interrupt,renderTake,
+      player:{
+        unlock,start,stop,flutterHz,audition,endAudition,replayStroke,cancelReplay,traces,reconcile,depthInfo,holdEnd,phase,
+        get auditioning(){return !!(pendingPreview||preview);},
+        get replaying(){return !!solo;},
+        get playing(){return !!transport;}
+      }
+    };
   }
 
-  document.addEventListener('visibilitychange',()=>{if(document.hidden)interrupt();});
-  document.addEventListener('freeze',interrupt);
-  window.addEventListener('pagehide',interrupt);
-  window.CarbonAudio={unlock,start,stop,flutterHz,get auditioning(){return !!(pendingPreview||preview);},audition,endAudition,replayStroke,cancelReplay,traces,reconcile,depthInfo,holdEnd,phase,get replaying(){return !!solo;},get playing(){return !!transport;}};
+  const live=createAudioEngine();
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)live.interrupt();});
+  document.addEventListener('freeze',live.interrupt);
+  window.addEventListener('pagehide',live.interrupt);
+  window.CarbonAudio=live.player;
+  live.player.renderTake=(notes,bpm)=>createAudioEngine(true).renderTake(notes,bpm);
 })();
 
 </script><script>
@@ -2124,6 +2211,110 @@ window.CarbonScene = function CarbonScene(canvas) {
 </script><script>
 'use strict';
 (() => {
+  function wav(audio) {
+    const channels = audio.numberOfChannels;
+    const sampleBytes = 2;
+    const frameBytes = channels * sampleBytes;
+    const dataBytes = audio.length * frameBytes;
+    const buffer = new ArrayBuffer(44 + dataBytes);
+    const data = new DataView(buffer);
+    function tag(offset, value) {
+      for (let i = 0; i < value.length; i++) data.setUint8(offset + i, value.charCodeAt(i));
+    }
+    tag(0, 'RIFF');
+    data.setUint32(4, buffer.byteLength - 8, true);
+    tag(8, 'WAVE');
+    tag(12, 'fmt ');
+    data.setUint32(16, 16, true);
+    data.setUint16(20, 1, true);
+    data.setUint16(22, channels, true);
+    data.setUint32(24, audio.sampleRate, true);
+    data.setUint32(28, audio.sampleRate * frameBytes, true);
+    data.setUint16(32, frameBytes, true);
+    data.setUint16(34, sampleBytes * 8, true);
+    tag(36, 'data');
+    data.setUint32(40, dataBytes, true);
+    const samples = Array.from({length: channels}, (_, i) => audio.getChannelData(i));
+    let offset = 44;
+    for (let frame = 0; frame < audio.length; frame++) {
+      for (const channel of samples) {
+        const value = Math.min(1, Math.max(-1, channel[frame]));
+        data.setInt16(offset, Math.round(value * (value < 0 ? 32768 : 32767)), true);
+        offset += sampleBytes;
+      }
+    }
+    return new Blob([buffer], {type: 'audio/wav'});
+  }
+
+  const ticksPerQuarter = 960;
+
+  function variableLength(value) {
+    const bytes = [value & 127];
+    for (value >>>= 7; value; value >>>= 7) bytes.unshift((value & 127) | 128);
+    return bytes;
+  }
+
+  function trackChunk(events, end) {
+    const bytes = [];
+    let previous = 0;
+    for (const {tick, data} of events) {
+      bytes.push(...variableLength(tick - previous), ...data);
+      previous = tick;
+    }
+    bytes.push(...variableLength(Math.max(0, end - previous)), 0xff, 0x2f, 0);
+    const header = new Uint8Array([0x4d, 0x54, 0x72, 0x6b, 0, 0, 0, 0]);
+    new DataView(header.buffer).setUint32(4, bytes.length);
+    return [header, Uint8Array.from(bytes)];
+  }
+
+  function voiceTrack(notes, name, channels, toTick, end) {
+    const title = Array.from(name, letter => letter.charCodeAt(0));
+    const events = [{tick: 0, data: [0xff, 0x03, title.length, ...title]}];
+    const active = new Map();
+    for (const note of notes) {
+      const start = toTick(note.start);
+      const finish = Math.max(start + 1, toTick(note.end));
+      if (!active.has(note.pitch)) active.set(note.pitch, new Map());
+      const releases = active.get(note.pitch);
+      // Separate concurrent instances of the same pitch so note-offs remain independent.
+      const channel = channels.find(candidate => !releases.has(candidate) || releases.get(candidate).tick <= start);
+      if (channel === undefined) {
+        // When every channel is occupied, keep the extra unison audible under an existing note.
+        const earliest = [...releases.values()].reduce((a, b) => a.tick <= b.tick ? a : b);
+        earliest.tick = Math.max(earliest.tick, finish);
+        continue;
+      }
+      const release = {tick: finish, data: [0x80 | channel, note.pitch, 0]};
+      releases.set(channel, release);
+      events.push({tick: start, data: [0x90 | channel, note.pitch, note.velocity]}, release);
+    }
+    const priority = event => event.data[0] === 0xff ? 0 : event.data[0] < 0x90 ? 1 : 2;
+    events.sort((a, b) => a.tick - b.tick || priority(a) - priority(b));
+    return trackChunk(events, end);
+  }
+
+  function midi(take) {
+    const toTick = time => Math.round(time * take.bpm * ticksPerQuarter / 60);
+    const end = toTick(take.duration);
+    const micros = Math.round(60000000 / take.bpm);
+    const header = new Uint8Array([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 1, 0, 3, ticksPerQuarter >> 8, ticksPerQuarter & 255]);
+    const tempo = trackChunk([
+      {tick: 0, data: [0xff, 0x03, 5, 84, 101, 109, 112, 111]},
+      {tick: 0, data: [0xff, 0x51, 3, micros >> 16, micros >> 8 & 255, micros & 255]},
+      {tick: 0, data: [0xff, 0x58, 4, 4, 2, 24, 8]}
+    ], end);
+    const notes = [...take.notes].sort((a, b) => a.start - b.start);
+    const copper = voiceTrack(notes.filter(n => n.kind === 'pluck'), 'Copper', [0,2,3,4,5,6,7,8], toTick, end);
+    const violet = voiceTrack(notes.filter(n => n.kind === 'grain'), 'Violet', [1,10,11,12,13,14,15], toTick, end);
+    return new Blob([header, ...tempo, ...copper, ...violet], {type: 'audio/midi'});
+  }
+
+  window.CarbonFiles = {wav,midi};
+})();
+
+</script><script>
+'use strict';
+(() => {
   const $ = id => document.getElementById(id);
   const canvas = $('score'), audio = window.CarbonAudio, scene = window.CarbonScene(canvas);
   const clamp = (n,min=0,max=1) => Math.max(min,Math.min(max,n));
@@ -2148,6 +2339,7 @@ window.CarbonScene = function CarbonScene(canvas) {
   ];
   let notes=structuredClone(starter);
   let lastScore=notes;
+  let renderingTake=false;
   const pulses=new Map(), history=[], reduced=matchMedia('(prefers-reduced-motion:reduce)');
   let depth=0,selectedId=null,cursor=null,pointer=null,frame=0,fluidTimer=0;
   let pendingTransport=false,transportEpoch=0,previewEpoch=0,previewAt=0,depthEdit=null;
@@ -2168,6 +2360,7 @@ window.CarbonScene = function CarbonScene(canvas) {
     $('apply').hidden=!n || (n.kind===brush.kind && n.fx.length===brush.fx.length && n.fx.every(f=>brush.fx.includes(f)));
     $('depth').value=Math.round(depth*100);$('depth-val').value=$('depth').value+'%';
     $('clear').disabled=!notes.length;
+    $('make-take').disabled=renderingTake||!notes.length;
     for(const b of document.querySelectorAll('[data-fx]'))b.setAttribute('aria-pressed',String(brush.fx.includes(b.dataset.fx)));
     for(const b of document.querySelectorAll('[data-kind]'))b.setAttribute('aria-pressed',String(b.dataset.kind===brush.kind));
     showBrushSummary();
@@ -2478,6 +2671,37 @@ window.CarbonScene = function CarbonScene(canvas) {
     remember(snapshot());
     for(const m of groupNotes(n)){m.kind=brush.kind;m.fx=[...brush.fx];}
     audio.reconcile(notes,n.group);audition(n,true);alignUI('Brush applied to drawing');
+  };
+  $('make-take').onclick=async()=>{
+    if(renderingTake||!notes.length)return;
+    const score=structuredClone(notes);
+    const bpm=Number($('tempo').value);
+    const status=$('take-status');
+    renderingTake=true;
+    $('make-take').disabled=true;
+    status.textContent='Preparing your four-pass take…';
+    try {
+      // Let the status paint before scheduling the offline score.
+      await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,0)));
+      const take=await audio.renderTake(score,bpm);
+      const files=[
+        [$('save-wav'),CarbonFiles.wav(take.audio)],
+        [$('save-midi'),CarbonFiles.midi(take)]
+      ];
+      for(const [link,blob] of files){
+        const url=URL.createObjectURL(blob);
+        if(link.hasAttribute('href'))URL.revokeObjectURL(link.href);
+        link.href=url;
+        link.hidden=false;
+      }
+      status.textContent=take.notes.length?'Your take is ready.':'Chance left this take silent. Prepare another for a new roll.';
+    } catch(error) {
+      console.error('Could not export the Habdash take',error);
+      status.textContent='Couldn’t prepare this take. Try again.';
+    } finally {
+      renderingTake=false;
+      $('make-take').disabled=!notes.length;
+    }
   };
   $('starter').onclick=()=>{
     stop();
