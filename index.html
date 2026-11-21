@@ -201,6 +201,9 @@ input{width:100%;height:32px;accent-color:#b18bff}
 #tour{max-height:44dvh;overflow:auto}
 #tour-more summary{cursor:pointer;color:#dac5eb}
 #tour-odds{color:#efc5a3}
+#tour-meter{height:4px;background:#44384f;margin-bottom:8px}
+#tour-meter::before{content:"";display:block;width:var(--chance-width,0%);height:100%;background:#efc5a3}
+#tour-result{color:#dccceb;font-size:16px}
 #tour p{margin:3px 0 8px}
 #tour .tour-row{display:flex;align-items:center;justify-content:space-between;gap:6px}
 #tour select,#tour button{font:inherit;color:#ecdbf3;background:transparent}
@@ -238,6 +241,8 @@ input{width:100%;height:32px;accent-color:#b18bff}
 <div class="tour-row"><select id="tour-stage" aria-label="Jump to a tour step"></select><button id="tour-close" aria-label="Close tour">×</button></div>
 <p id="tour-tip" aria-live="polite"></p>
 <p id="tour-odds" hidden></p>
+<div id="tour-meter" hidden aria-hidden="true"></div>
+<div id="tour-result" hidden></div>
 <details id="tour-more"><summary>How it works</summary><p id="tour-detail"></p></details>
 <div class="tour-row"><button id="tour-back">Back</button><button id="tour-next">Next →</button></div>
 </aside>
@@ -2140,6 +2145,7 @@ window.CarbonScene = function CarbonScene(canvas) {
   function alignUI(message){
     if(notes!==lastScore){audio.reconcile(notes);lastScore=notes;}
     const n=selected();
+    $('depth').dataset.chanceActive = String((n?.fx ?? brush.fx).includes('chance'));
     $('depth').setAttribute('aria-label',n?'Depth of selected stroke':'Drawing depth');
     $('depth').setAttribute('aria-valuetext',Math.round(depth*100)+'% toward far');
     $('sounds').hidden=!$('settings').hidden;$('erase').hidden=!n;$('undo').hidden=!history.length;
@@ -2266,6 +2272,16 @@ window.CarbonScene = function CarbonScene(canvas) {
           const time=performance.now();
           for(const id of hit)pulses.set(id,{time,skipped:false});
           for(const id of skipped)pulses.set(id,{time,skipped:true});
+          const result = $('tour-result');
+          if (result && !result.closest('[hidden]')) {
+            const target = selected() ?? notes.findLast(n => n.fx.includes('chance'));
+            const sounded = hit.length > 0;
+            const member = notes.find(n => n.id === (sounded ? hit[0] : skipped[0]));
+            if (target?.fx.includes('chance') && member?.group === target.group) {
+              const label = selected() ? 'Last roll · selected line' : 'Last roll · latest dice line';
+              result.textContent = label + (sounded ? ' · sounded' : ' · silent');
+            }
+          }
           requestDraw();
         }});
       alignUI('');
@@ -2745,7 +2761,7 @@ window.CarbonScene = function CarbonScene(canvas) {
     ['Echo', 'With Echo enabled, draw a short note at Near. Move the slider to Far and draw another at the same height. Listen after each attack.', '[data-fx="space"], #depth', 'Depth changes the balance of direct sound and reflections. Near gives the attack more presence. Far softens it and sends more of the note into the room.'],
     ['Brightness', 'Enable Brightness and draw a level line. Tap it to select it, then move its depth slider from Near to Far. Listen for overtones emerging above the pitch.', '[data-fx="tone"], #depth', 'The filter opens as depth increases, revealing higher harmonics. To hear Brightness on its own, choose it as the only effect before drawing.'],
     ['Buzz', 'Enable Buzz and draw a note. Select it and move its depth slider toward Far. Listen for a toothed edge building around the same pitch.', '[data-fx="wave"], #depth', 'Buzz mixes in a sawtooth-like waveform rich in harmonics. Brightness shapes which harmonics come through. Try both effects on a new stroke.'],
-    ['Chance', 'Turn on the dice, set depth halfway between Near and Far, and draw a straight line. Each time the loop reaches it, there’s a 25% chance you’ll hear that line and a 75% chance it will stay silent.', '[data-fx="chance"], #depth', 'The instrument makes a fresh choice each time around. You might hear the line twice in a row or wait several loops. At Near it sounds every time. At Far its chance is 1 in 16. On a folded stroke, the instrument chooses separately for each branch, using the depth where playback enters it. Solo previews always sound.'],
+    ['Chance', 'Draw one note that can come and go while the rest of the loop keeps time.', '[data-fx="chance"], #depth', 'The instrument makes a fresh choice each time around. You might hear the line twice in a row or wait several loops. At Near it sounds every time. At Far its chance is 1 in 16. On a folded stroke, the instrument chooses separately for each branch, using the depth where playback enters it. Solo previews always sound.'],
     ['Edit', 'Tap a stroke to hear it alone. Drag it higher to raise its pitches or sideways to shift when it plays. Pull its depth rail to hear its selected effects change.', '#depth', 'Choosing brushes and effects sets up your next stroke. To give those settings to an existing stroke, select it and tap the stamp. Undo restores your previous edit.'],
     ['Turn', 'Drag the cube to look along the depth axis. Strokes that overlap from the front can sit far apart. Use the curved arrow to return to the opening angle.', '#orbit', 'Turning changes your viewpoint. Each stroke keeps its timing, pitches, and depth. Tap the cube to switch between drawing and turning the view.']
   ];
@@ -2776,6 +2792,9 @@ window.CarbonScene = function CarbonScene(canvas) {
     get('tour-detail').textContent = detail;
     get('tour-more').open = false;
     get('tour-odds').hidden = steps[i][0] !== 'Chance';
+    get('tour-result').hidden = get('tour-odds').hidden;
+    get('tour-result').textContent = '';
+    get('tour-meter').hidden = get('tour-odds').hidden;
     updateOdds();
     get('tour-back').disabled = i === 0;
     get('tour-next').textContent = i === steps.length-1 ? 'Done' : 'Next →';
@@ -2784,8 +2803,22 @@ window.CarbonScene = function CarbonScene(canvas) {
     if (tour.hidden || get('tour-odds').hidden) return;
     const depth = Number(get('depth').value) / 100;
     const percent = Number((100 * CarbonAudio.depthInfo(depth, ['chance']).chance).toFixed(2));
-    get('tour-odds').textContent = 'Chance at this depth: ' + percent + '% sound · ' + Number((100 - percent).toFixed(2)) + '% silence';
+    const enabled = document.querySelector('[data-fx="chance"]').getAttribute('aria-pressed') === 'true';
+    const editing = !get('erase').hidden;
+    const active = get('depth').dataset.chanceActive === 'true';
+    const prompt = editing && active ? 'Move this line in depth. The next loop uses its new odds.' : !enabled ? 'Tap the dice in the brush menu to give your next line a chance of sounding.' :
+      editing ? 'The slider moves the selected line. To give it the dice setting, tap the stamp if it appears.' :
+      'Slide between Near and Far, then draw a straight line. Listen for it each time the loop comes around.';
+    get('tour-tip').textContent = prompt;
+    get('tour-odds').textContent = active
+      ? 'With dice at this depth: ' + percent + '% sound · ' + Number((100 - percent).toFixed(2)) + '% silence'
+      : (editing ? 'Selected line · sounds every loop' : 'Dice off · new lines sound every loop');
+    get('tour-meter').style.setProperty('--chance-width', (active ? percent : 100) + '%');
+    get('tour-meter').hidden = !active;
   }
+  new MutationObserver(updateOdds).observe(document.querySelector('[data-fx="chance"]'), {
+    attributes:true, attributeFilter:['aria-pressed']
+  });
   get('depth').addEventListener('input', updateOdds);
   new MutationObserver(updateOdds).observe(get('depth-val'), {childList:true, subtree:true, characterData:true});
   function close() {
