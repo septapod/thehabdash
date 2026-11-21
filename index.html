@@ -2356,7 +2356,7 @@ window.CarbonScene = function CarbonScene(canvas) {
       case 'space':return compact?(z<.2?'Close, with little echo':z<.65?'Room echo':'Distant, with more echo'):'Farther back, you hear more echo.';
       case 'chance':{
         const pct=Number((audio.depthInfo(z,['chance']).chance*100).toFixed(2));
-        return compact?`${pct}% chance to play per pass here`:`Farther back, notes play less often. A note starting here has a ${pct}% chance per pass.`;
+        return compact?`${pct}% chance to sound each loop`:`Each time the loop reaches a note starting here, it has a ${pct}% chance to sound. Moving it farther back lowers that chance.`;
       }
       case 'tone':return compact?(z<.22?'Mellow tone':z<.53?'Warm tone':z<.8?'Bright tone':'Glassy tone'):'Near sounds mellow. Far brings out bright overtones at the same pitch.';
       case 'wave':return compact?(z===0?'Smooth tone':z===1?'Buzzy sawtooth':`${Math.round(100*z)}% sawtooth buzz`):'Move farther back to turn a smooth tone into a buzz.';
@@ -2745,7 +2745,7 @@ window.CarbonScene = function CarbonScene(canvas) {
     ['Echo', 'With Echo enabled, draw a short note at Near. Move the slider to Far and draw another at the same height. Listen after each attack.', '[data-fx="space"], #depth', 'Depth changes the balance of direct sound and reflections. Near gives the attack more presence. Far softens it and sends more of the note into the room.'],
     ['Brightness', 'Enable Brightness and draw a level line. Tap it to select it, then move its depth slider from Near to Far. Listen for overtones emerging above the pitch.', '[data-fx="tone"], #depth', 'The filter opens as depth increases, revealing higher harmonics. To hear Brightness on its own, choose it as the only effect before drawing.'],
     ['Buzz', 'Enable Buzz and draw a note. Select it and move its depth slider toward Far. Listen for a toothed edge building around the same pitch.', '[data-fx="wave"], #depth', 'Buzz mixes in a sawtooth-like waveform rich in harmonics. Brightness shapes which harmonics come through. Try both effects on a new stroke.'],
-    ['Chance', 'With the dice enabled, draw a straight line at Near. Set the depth slider halfway and draw a second line. In the loop, the first plays every pass. The second has a 1 in 4 chance each pass.', '[data-fx="chance"], #depth', 'Each pass gets a fresh roll, so several hits or rests can come in a row. At Far the odds are 1 in 16. A folded stroke rolls separately for each branch, using its depth where playback enters it. Solo previews always sound.'],
+    ['Chance', 'Turn on the dice, set depth halfway between Near and Far, and draw a straight line. Each time the loop reaches it, there’s a 25% chance you’ll hear that line and a 75% chance it will stay silent.', '[data-fx="chance"], #depth', 'The instrument makes a fresh choice each time around. You might hear the line twice in a row or wait several loops. At Near it sounds every time. At Far its chance is 1 in 16. On a folded stroke, the instrument chooses separately for each branch, using the depth where playback enters it. Solo previews always sound.'],
     ['Edit', 'Tap a stroke to hear it alone. Drag it higher to raise its pitches or sideways to shift when it plays. Pull its depth rail to hear its selected effects change.', '#depth', 'Choosing brushes and effects sets up your next stroke. To give those settings to an existing stroke, select it and tap the stamp. Undo restores your previous edit.'],
     ['Turn', 'Drag the cube to look along the depth axis. Strokes that overlap from the front can sit far apart. Use the curved arrow to return to the opening angle.', '#orbit', 'Turning changes your viewpoint. Each stroke keeps its timing, pitches, and depth. Tap the cube to switch between drawing and turning the view.']
   ];
@@ -2784,7 +2784,7 @@ window.CarbonScene = function CarbonScene(canvas) {
     if (tour.hidden || get('tour-odds').hidden) return;
     const depth = Number(get('depth').value) / 100;
     const percent = Number((100 * CarbonAudio.depthInfo(depth, ['chance']).chance).toFixed(2));
-    get('tour-odds').textContent = 'At this depth with Chance: ' + percent + '% per roll';
+    get('tour-odds').textContent = 'Chance at this depth: ' + percent + '% sound · ' + Number((100 - percent).toFixed(2)) + '% silence';
   }
   get('depth').addEventListener('input', updateOdds);
   new MutationObserver(updateOdds).observe(get('depth-val'), {childList:true, subtree:true, characterData:true});
