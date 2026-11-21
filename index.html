@@ -197,8 +197,15 @@ input{width:100%;height:32px;accent-color:#b18bff}
 }
 @media(max-width:350px){.soundtray{bottom:67px}}
 
-#tour{position:absolute;top:max(12px,env(safe-area-inset-top));left:12px;width:min(338px,calc(100% - 95px));padding:9px 13px;background:#17121fee;border:1px solid #514358;font:16px/1.4 HabdashMono,monospace}
-#tour{max-height:44dvh;overflow:auto}
+#tour{
+  position:absolute;top:max(20px,env(safe-area-inset-top));left:max(20px,env(safe-area-inset-left));
+  width:min(360px,calc(100% - max(20px,env(safe-area-inset-left)) - max(76px,env(safe-area-inset-right))));
+  max-height:clamp(168px,46dvh,420px);
+  display:flex;flex-direction:column;padding:12px clamp(16px,5vw,22px);
+  background:#17121fee;border:1px solid #514358;font:16px/1.4 HabdashMono,monospace;
+}
+#tour-content{min-height:0;overflow:auto;padding:5px 0 9px;overscroll-behavior:contain}
+#tour .tour-row{flex-shrink:0}
 #tour-more summary{cursor:pointer;color:#dac5eb}
 #tour-odds{color:#efc5a3}
 #tour-meter{height:4px;background:#44384f;margin-bottom:8px}
@@ -239,11 +246,13 @@ input{width:100%;height:32px;accent-color:#b18bff}
 <div class="corner"><button id="apply" title="Apply brush to selected drawing" aria-label="Apply brush to selected drawing" hidden><svg viewBox="0 0 32 32"><path d="M5 24v-5l7-2 1-5c-1-2-2-3-2-5a5 5 0 0 1 10 0c0 2-1 3-2 5l1 5 7 2v5ZM6 28h20"/></svg></button><button id="erase" title="Erase this drawing" aria-label="Erase this drawing" hidden><svg viewBox="0 0 32 32"><path d="M4 19L18 5l10 10-12 12H11ZM12 12l10 10M16 27h13"/></svg></button><button id="options" title="Instrument options" aria-label="Instrument options" aria-expanded="false" aria-controls="settings"><svg viewBox="0 0 32 32"><path d="M4 10h9m6 0h9M4 22h15m6 0h3"/><circle cx="16" cy="10" r="3"/><circle cx="22" cy="22" r="3"/></svg></button></div>
 <aside id="tour" hidden aria-label="Playing tour">
 <div class="tour-row"><select id="tour-stage" aria-label="Jump to a tour step"></select><button id="tour-close" aria-label="Close tour">×</button></div>
+<div id="tour-content">
 <p id="tour-tip" aria-live="polite"></p>
 <p id="tour-odds" hidden></p>
 <div id="tour-meter" hidden aria-hidden="true"></div>
 <div id="tour-result" hidden></div>
 <details id="tour-more"><summary>How it works</summary><p id="tour-detail"></p></details>
+</div>
 <div class="tour-row"><button id="tour-back">Back</button><button id="tour-next">Next →</button></div>
 </aside>
 <section id="settings" aria-label="Instrument options" hidden><label for="tempo">Tempo <output id="bpm">92 BPM</output></label><input type="range" id="tempo" min="50" max="160" value="92">
