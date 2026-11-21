@@ -260,7 +260,7 @@ input{width:100%;height:32px;accent-color:#b18bff}
 <section id="settings" aria-label="Instrument options" hidden><label for="tempo">Tempo <output id="bpm">92 BPM</output></label><input type="range" id="tempo" min="50" max="160" value="92">
 <div id="take-export">
 <button type="button" id="make-take">Prepare audio export</button>
-<p id="take-status" role="status">WAV plays your score four times at your chosen tempo, then lets the echo fade. MIDI saves the notes that sounded in that take.</p>
+<p id="take-status" role="status">WAV plays four loops at the tempo you set, plus about two seconds for the echo to fade. MIDI saves the notes that sounded in those same four loops on separate Copper and Violet tracks.</p>
 <a id="save-wav" download="the-habdash.wav" hidden>Save WAV</a>
 <a id="save-midi" download="the-habdash.mid" hidden>Save MIDI</a>
 </div>
