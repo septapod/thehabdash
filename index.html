@@ -196,6 +196,15 @@ input{width:100%;height:32px;accent-color:#b18bff}
   main:has(#undo:not([hidden])) .soundtray{bottom:67px}
 }
 @media(max-width:350px){.soundtray{bottom:67px}}
+
+#tour{position:absolute;top:max(12px,env(safe-area-inset-top));left:12px;width:min(338px,calc(100% - 95px));padding:9px 13px;background:#17121fee;border:1px solid #514358;font:16px/1.4 HabdashMono,monospace}
+#tour p{margin:3px 0 8px}
+#tour .tour-row{display:flex;align-items:center;justify-content:space-between;gap:6px}
+#tour select,#tour button{font:inherit;color:#ecdbf3;background:transparent}
+#tour select{max-width:calc(100% - 48px);border:0;font-size:16px}
+#tour button{padding:3px 7px}
+#tour-next{margin-left:auto}
+.tour-target{outline:1px solid #e1b6fd;outline-offset:1px}
 </style>
 </head><body><main aria-label="Musical drawing instrument">
 <canvas id="score" tabindex="0" aria-label="Draw a musical phrase, or select a stroke to shape its depth and sound" aria-describedby="keys"></canvas>
@@ -222,14 +231,16 @@ input{width:100%;height:32px;accent-color:#b18bff}
 </div>
 </div>
 <div class="corner"><button id="apply" title="Apply brush to selected drawing" aria-label="Apply brush to selected drawing" hidden><svg viewBox="0 0 32 32"><path d="M5 24v-5l7-2 1-5c-1-2-2-3-2-5a5 5 0 0 1 10 0c0 2-1 3-2 5l1 5 7 2v5ZM6 28h20"/></svg></button><button id="erase" title="Erase this drawing" aria-label="Erase this drawing" hidden><svg viewBox="0 0 32 32"><path d="M4 19L18 5l10 10-12 12H11ZM12 12l10 10M16 27h13"/></svg></button><button id="options" title="Instrument options" aria-label="Instrument options" aria-expanded="false" aria-controls="settings"><svg viewBox="0 0 32 32"><path d="M4 10h9m6 0h9M4 22h15m6 0h3"/><circle cx="16" cy="10" r="3"/><circle cx="22" cy="22" r="3"/></svg></button></div>
+<aside id="tour" hidden aria-label="Playing tour">
+<div class="tour-row"><select id="tour-stage" aria-label="Jump to a tour step"></select><button id="tour-close" aria-label="Close tour">×</button></div>
+<p id="tour-tip" aria-live="polite"></p>
+<div class="tour-row"><button id="tour-back">Back</button><button id="tour-next">Next →</button></div>
+</aside>
 <section id="settings" aria-label="Instrument options" hidden><label for="tempo">Tempo <output id="bpm">92 BPM</output></label><input type="range" id="tempo" min="50" max="160" value="92">
-<details><summary>Playing guide</summary>
-<p>Tap Play to hear the score loop. Draw on the grid to hear notes under your finger or pointer. When you lift, your stroke plays on its own.</p>
-<p>Higher marks sound higher. The light plays the score from left to right, so wider strokes sound longer. A loop in your drawing can sound two pitches at once.</p>
-<p>Tap the copper brush for a plucked wire or violet for a hollow reed. Open the arrow beside the brushes to choose depth effects for your next stroke. Farther back, Echo adds reflections, Chance makes notes play less often, Brightness brings out higher overtones, and Buzz roughens the tone.</p>
-<p>Tap a stroke to hear and select it, then drag it to move it. Use the slider or the stroke’s rail to move it nearer or farther. The slider sets the depth of your next stroke when the grid has no selection. While drawing, scroll or slide a second finger up or down to bend the stroke in depth. The stamp applies your current brush and effects to the selected stroke.</p>
-<p>Drag the cube or the space outside the grid to turn the view. Tap the cube to switch between drawing and turning. The curved arrow restores the opening view.</p>
-<p>Load starter phrase replaces the score. Tap Play to hear it, or Undo to bring back your drawing.</p>
+<button id="tour-start">Show me how it works</button>
+<details><summary>Quick reference</summary>
+<p>Height sets pitch. Width sets playing time. Tap a stroke to select it. The stamp applies your brush to it. While drawing, scroll or slide a second finger up or down to change depth.</p>
+<p>Load starter phrase replaces the score. Undo brings your drawing back.</p>
 <p>With the grid focused, use the arrow keys to move and Enter to place or select a note. Use the bracket keys for depth, Space for playback, and Delete to erase the selected stroke.</p>
 <p><a href="wire-and-ribbon.mp4">Earlier study · plucked wire and bowed ribbon</a></p><p><a href="brightness.mp3">Earlier study · brightness at three depths</a></p></details>
 <button id="starter">Load starter phrase</button>
@@ -2717,6 +2728,72 @@ window.CarbonScene = function CarbonScene(canvas) {
   document.addEventListener('visibilitychange',restoreView);
   window.addEventListener('pageshow',restoreView);
   alignUI();
+})();
+
+</script><script>
+(() => {
+  const get = id => document.getElementById(id);
+  const steps = [
+    ['Draw', 'Draw a rising line on the grid. Listen as you draw, then lift to hear it again.', ''],
+    ['Loop', 'Use Play to hear the whole score. Draw a circle and listen for two pitches as the light crosses both sides.', '#transport'],
+    ['Voices', 'Tap copper to hear a pluck. Tap violet to hear the reed. Draw with either brush to add that voice.', '[data-kind]'],
+    ['Echo', 'Turn on Echo. Move the depth slider toward Far and draw a line. Listen for its reflections.', '[data-fx="space"], #depth'],
+    ['Brightness', 'Turn on Brightness. Try the same pitch near and far. Far brings out bright overtones.', '[data-fx="tone"], #depth'],
+    ['Buzz', 'Turn on Buzz. Move from Near to Far to hear the smooth tone grow rough. Effects can play together.', '[data-fx="wave"], #depth'],
+    ['Chance', 'Turn on Chance and draw near the back. Play the loop for a few passes. That stroke can skip a pass.', '[data-fx="chance"], #depth'],
+    ['Edit', 'Tap a stroke to hear it. Drag it to move it, or use the slider to change its depth.', '#depth'],
+    ['Turn', 'Drag the cube to see your music from another angle. Tap Done to keep playing.', '#orbit']
+  ];
+  const tour = get('tour'), stage = get('tour-stage');
+  const storageKey = 'habdash-playing-tour-step';
+  let index = 0;
+  try {
+    const stored = Number(localStorage.getItem(storageKey));
+    if (Number.isInteger(stored) && stored >= 0 && stored < steps.length) index = stored;
+  } catch {}
+  steps.forEach(([name], i) => stage.add(new Option((i+1)+'/'+steps.length+' · '+name, i)));
+  function persist() {
+    try { localStorage.setItem(storageKey, String(index)); } catch {}
+  }
+  function clearTargets() {
+    document.querySelectorAll('.tour-target').forEach(el => el.classList.remove('tour-target'));
+  }
+  function render(i) {
+    index = i;
+    persist();
+    clearTargets();
+    const [name, tip, targets] = steps[i];
+    const effects = targets.includes('data-fx');
+    if (effects === get('fx-panel').hidden) get('fx-toggle').click();
+    if (targets) document.querySelectorAll(targets).forEach(el => el.classList.add('tour-target'));
+    stage.value = String(i);
+    get('tour-tip').textContent = tip;
+    get('tour-back').disabled = i === 0;
+    get('tour-next').textContent = i === steps.length-1 ? 'Done' : 'Next →';
+  }
+  function close() {
+    tour.hidden = true;
+    clearTargets();
+    if (!get('fx-panel').hidden) get('fx-toggle').click();
+    get('options').focus();
+  }
+  get('tour-start').onclick = () => {
+    get('options').click();
+    tour.hidden = false;
+    stage.focus();
+    render(index);
+  };
+  get('tour-close').onclick = close;
+  get('options').addEventListener('click', () => { if (!tour.hidden) close(); });
+  get('tour-back').onclick = () => render(index-1);
+  get('tour-next').onclick = () => {
+    if (index < steps.length-1) render(index+1);
+    else { close(); index=0; persist(); }
+  };
+  stage.onchange = () => render(Number(stage.value));
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !tour.hidden) close();
+  });
 })();
 
 </script></body></html>
