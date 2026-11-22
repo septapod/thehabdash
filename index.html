@@ -1342,6 +1342,12 @@ window.CarbonScene = function CarbonScene(canvas) {
   const depthFraction=z=>z/(.69+.31*z);
   const pivotFraction=depthFraction(.5);
   function isHome(){return yaw===0&&tilt===0;}
+  function scaleSheet(sheet,cx,cy,scale){
+    return {
+      x:cx+(sheet.x-cx)*scale, y:cy+(sheet.y-cy)*scale,
+      xx:sheet.xx*scale, xy:sheet.xy*scale, yx:sheet.yx*scale, yy:sheet.yy*scale
+    };
+  }
   function updateCamera(){
     if(isHome()){
       front=homeFront;back=homeBack;
@@ -1371,11 +1377,16 @@ window.CarbonScene = function CarbonScene(canvas) {
         if(dy>0)fit=Math.min(fit,(h*.95-cy)/dy);
         if(dy<0)fit=Math.min(fit,(h*.04-cy)/dy);
       }
-      for(const sheet of [front,back]){
-        sheet.x=cx+(sheet.x-cx)*fit;sheet.y=cy+(sheet.y-cy)*fit;
-        sheet.xx*=fit;sheet.xy*=fit;sheet.yx*=fit;sheet.yy*=fit;
-      }
+      front=scaleSheet(front,cx,cy,fit);
+      back=scaleSheet(back,cx,cy,fit);
     }
+    // Leave room around the sculpture at every angle. On narrow screens,
+    // bias the frame slightly left to leave room for the depth slider.
+    const narrow=w<540 && h>=w;
+    const frameScale=narrow ? .90 : .89;
+    const frameX=w*(narrow ? .25 : .5);
+    front=scaleSheet(front,frameX,h/2,frameScale);
+    back=scaleSheet(back,frameX,h/2,frameScale);
     projectionRevision++;backdropDirty=true;
   }
   function turn(deltaYaw,deltaTilt){
